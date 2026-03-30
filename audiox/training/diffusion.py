@@ -29,6 +29,19 @@ import tracemalloc
 
 torch.backends.cudnn.allow_tf32 = False
 
+
+def _stack_padding_masks(metadata: tp.List[tp.Dict[str, tp.Any]], device: tp.Union[torch.device, str]) -> torch.Tensor:
+    padding_masks = []
+    for md in metadata:
+        mask = md["padding_mask"]
+        if mask.ndim == 1:
+            padding_masks.append(mask)
+        elif mask.ndim == 2 and mask.shape[0] == 1:
+            padding_masks.append(mask[0])
+        else:
+            padding_masks.append(mask.squeeze(0))
+    return torch.stack(padding_masks, dim=0).to(device).bool()
+
 def take_memory_snapshot(label):
     snapshot = tracemalloc.take_snapshot()
     top_stats = snapshot.statistics("traceback")
@@ -273,7 +286,7 @@ class DiffusionCondTrainingWrapper(pl.LightningModule):
 
         self.diffusion_objective = model.diffusion_objective
 
-        if 'dasheng-loss' in optimizer_configs and optimizer_configs['dasheng-loss'].get('if_add_dasheng_loss', False):
+        if optimizer_configs is not None and 'dasheng-loss' in optimizer_configs and optimizer_configs['dasheng-loss'].get('if_add_dasheng_loss', False):
             dasheng_align_weight = optimizer_configs['dasheng-loss']['config']['weight']
             model_path = optimizer_configs['dasheng-loss']['model_path']
             from transformers import AutoModel, AutoFeatureExtractor
@@ -373,7 +386,7 @@ class DiffusionCondTrainingWrapper(pl.LightningModule):
 
         # Create batch tensor of attention masks from the "mask" field of the metadata array
         if use_padding_mask:
-            padding_masks = torch.stack([md["padding_mask"][0] for md in metadata], dim=0).to(self.device) # Shape (batch_size, sequence_length)
+            padding_masks = _stack_padding_masks(metadata, self.device) # Shape (batch_size, sequence_length)
 
         p.tick("conditioning")
 
@@ -530,7 +543,7 @@ class DiffusionCondTrainingWrapper(pl.LightningModule):
 
         # Create batch tensor of attention masks from the "mask" field of the metadata array
         if use_padding_mask:
-            padding_masks = torch.stack([md["padding_mask"][0] for md in metadata], dim=0).to(self.device) # Shape (batch_size, sequence_length)
+            padding_masks = _stack_padding_masks(metadata, self.device) # Shape (batch_size, sequence_length)
 
         p.tick("conditioning")
 

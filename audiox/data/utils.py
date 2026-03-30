@@ -114,7 +114,6 @@ class Stereo(nn.Module):
 import os
 import math
 import subprocess as sp
-from decord import VideoReader, cpu
 import torch
 import torchvision.transforms as transforms
 from PIL import Image
@@ -143,6 +142,11 @@ def read_video(filepath, seek_time=0., duration=-1, target_fps=2):
         frame = frame.repeat(int(math.ceil(target_frames / frame.shape[0])), 1, 1, 1)[:target_frames]
         assert frame.shape[0] == target_frames, f"The shape of frame is {frame.shape}"
         return frame
+
+    try:
+        from decord import VideoReader, cpu
+    except ImportError as exc:
+        raise ImportError("decord is required to read video files. Install it or pass image/video features directly.") from exc
 
     vr = VideoReader(filepath, ctx=cpu(0))
     fps = vr.get_avg_fps()
@@ -214,7 +218,14 @@ def load_and_process_audio(audio_path, sample_rate, seconds_start, seconds_total
     return audio_tensor
 
 
-def encode_video_with_synchformer(video_path, model_name, seconds_start=0, seconds_total=10, device="cuda"):
+def encode_video_with_synchformer(
+    video_path,
+    model_name,
+    seconds_start=0,
+    seconds_total=10,
+    device="cuda",
+    synchformer_ckpt_path=None,
+):
     """
     Initialize synchformer and encode video for AudioX-MAF or AudioX-MAF-MMDiT models.
     
@@ -234,7 +245,7 @@ def encode_video_with_synchformer(video_path, model_name, seconds_start=0, secon
     from ..models.synchformer.features_utils import FeaturesUtils
     
     # Download synchformer checkpoint if not present
-    synchformer_path = "model/synchformer_state_dict.pth"
+    synchformer_path = synchformer_ckpt_path or "model/synchformer_state_dict.pth"
     if not os.path.exists(synchformer_path):
         os.makedirs("model", exist_ok=True)
         repo = model_name.replace("HKUSTAudio/", "")

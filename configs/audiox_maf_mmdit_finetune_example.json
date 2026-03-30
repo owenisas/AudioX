@@ -1,0 +1,50 @@
+{
+  "pretrained_name": "HKUSTAudio/AudioX-MAF-MMDiT",
+  "output_dir": "./outputs/audiox_maf_mmdit_ifcaps_xml",
+  "data": {
+    "train_manifest": "./data/ifcaps_train.jsonl",
+    "val_manifest": "./data/ifcaps_val.jsonl",
+    "batch_size": 1,
+    "eval_batch_size": 1,
+    "num_workers": 2,
+    "pin_memory": true,
+    "persistent_workers": true,
+    "drop_last": false,
+    "random_crop": true,
+    "seed": 0,
+    "prompt_format": "mixed",
+    "xml_compact": true,
+    "xml_include_caption": true,
+    "xml_max_events": 8,
+    "include_video_conditioning": false,
+    "include_audio_conditioning": false,
+    "compute_video_sync_on_the_fly": false
+  },
+  "training": {
+    "text_max_length": 256,
+    "learning_rate": 1e-05,
+    "use_ema": true,
+    "mask_padding": true,
+    "cfg_dropout_prob": 0.1,
+    "timestep_sampler": "uniform",
+    "log_loss_info": false
+  },
+  "trainer": {
+    "accelerator": "gpu",
+    "devices": 4,
+    "precision": "16-mixed",
+    "max_epochs": 1,
+    "accumulate_grad_batches": 2,
+    "gradient_clip_val": 1.0,
+    "log_every_n_steps": 10,
+    "num_sanity_val_steps": 0,
+    "val_check_interval": 1000
+  },
+  "checkpointing": {
+    "dirpath": "./outputs/audiox_maf_mmdit_ifcaps_xml/checkpoints",
+    "filename": "step={step}",
+    "save_last": true,
+    "save_top_k": -1,
+    "every_n_train_steps": 1000
+  }
+}

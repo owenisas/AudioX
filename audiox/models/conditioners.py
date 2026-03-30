@@ -928,21 +928,20 @@ class MultiConditioner(nn.Module):
         conditioners: a dictionary of conditioners with keys corresponding to the keys of the conditioning input dictionary (e.g. "prompt")
         default_keys: a dictionary of default keys to use if the key is not in the input dictionary (e.g. {"prompt_t5": "prompt"})
     """
-    def __init__(self, conditioners: tp.Dict[str, Conditioner], default_keys: tp.Dict[str, str] = {}):
+    def __init__(self, conditioners: tp.Dict[str, Conditioner], default_keys: tp.Optional[tp.Dict[str, str]] = None):
         super().__init__()
 
         self.conditioners = nn.ModuleDict(conditioners)
-        self.default_keys = default_keys
+        self.default_keys = default_keys or {}
 
     def forward(self, batch_metadata: tp.List[tp.Dict[str, tp.Any]], device: tp.Union[torch.device, str]) -> tp.Dict[str, tp.Any]:
         output = {}
 
         for key, conditioner in self.conditioners.items():
-            condition_key = key
-
             conditioner_inputs = []
 
             for x in batch_metadata:
+                condition_key = key
 
                 if condition_key not in x:
                     if condition_key in self.default_keys:
@@ -950,7 +949,7 @@ class MultiConditioner(nn.Module):
                     else:
                         raise ValueError(f"Conditioner key {condition_key} not found in batch metadata")
 
-                if isinstance(x[condition_key], list) or isinstance(x[condition_key], tuple) and len(x[condition_key]) == 1:
+                if isinstance(x[condition_key], list) or (isinstance(x[condition_key], tuple) and len(x[condition_key]) == 1):
                     conditioner_input = x[condition_key][0]
 
                 else:
@@ -974,6 +973,7 @@ def create_multi_conditioner_from_conditioning_config(config: tp.Dict[str, tp.An
     cond_dim = config["cond_dim"]
     
     default_keys = config.get("default_keys", {})
+    default_keys.setdefault("text_prompt", "prompt")
 
     for conditioner_info in config["configs"]:
         id = conditioner_info["id"]
