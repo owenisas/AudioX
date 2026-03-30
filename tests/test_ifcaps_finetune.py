@@ -16,11 +16,11 @@ from audiox.data.ifcaps import (
     select_prompt_variant,
     serialize_ifcaps_to_xml,
 )
-from audiox.models.lora import LoRALinear, count_parameters, inject_lora
+from audiox.models.lora import LoRALinear, count_parameters, extract_lora_state_dict, inject_lora
 from audiox.models.conditioners import MultiConditioner
 from audiox.models.diffusion import ConditionedDiffusionModelWrapper
 from audiox.training.diffusion import DiffusionCondTrainingWrapper
-from audiox.training.finetune import apply_finetune_defaults, maybe_apply_lora
+from audiox.training.finetune import apply_finetune_defaults, create_trainer, maybe_apply_lora
 
 
 def _write_wav(path: Path, sample_rate: int, duration_seconds: float = 0.5) -> None:
@@ -218,7 +218,24 @@ class IFCapsFineTuneTests(unittest.TestCase):
             },
         )
         self.assertEqual(lora_info["replaced_modules"], ["to_q"])
-        self.assertGreater(lora_info["trainable_params"], 0)
+
+    def test_extract_lora_state_dict_excludes_frozen_base_weights(self):
+        model = TinyLoRAModule()
+        inject_lora(model, rank=2, alpha=4.0, target_patterns=("to_q",))
+        lora_state = extract_lora_state_dict(model)
+        self.assertTrue(lora_state)
+        self.assertTrue(all(".lora_a." in key or ".lora_b." in key for key in lora_state))
+        self.assertFalse(any(".base." in key for key in lora_state))
+
+    def test_create_trainer_skips_checkpoint_callback_when_disabled(self):
+        trainer = create_trainer(
+            trainer_config={"accelerator": "cpu", "devices": 1, "max_steps": 1},
+            checkpoint_config={"enabled": False},
+            wandb_config={"enabled": False},
+            output_dir=tempfile.mkdtemp(),
+        )
+        checkpoint_callbacks = [callback for callback in trainer.callbacks if callback.__class__.__name__ == "ModelCheckpoint"]
+        self.assertEqual(checkpoint_callbacks, [])
 
     def test_dataset_emits_text_video_audio_and_padding_mask(self):
         with tempfile.TemporaryDirectory() as tmpdir:

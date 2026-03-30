@@ -1,17 +1,19 @@
 import copy
 import json
+import os
 import typing as tp
 from pathlib import Path
 
 import pytorch_lightning as pl
 from huggingface_hub import hf_hub_download
 from pytorch_lightning.callbacks import LearningRateMonitor, ModelCheckpoint
-from pytorch_lightning.loggers import CSVLogger
+from pytorch_lightning.loggers import CSVLogger, WandbLogger
+import torch
 from torch.utils.data import DataLoader
 
 from ..data.ifcaps import IFCapsFineTuneDataset, collate_audiox_batch
 from ..models.factory import create_model_from_config
-from ..models.lora import count_parameters, inject_lora
+from ..models.lora import count_parameters, extract_lora_state_dict, inject_lora
 from ..models.utils import load_ckpt_state_dict
 from .factory import create_training_wrapper_from_config
 from .utils import copy_state_dict
@@ -307,36 +309,68 @@ def create_finetune_dataloaders(
 def create_trainer(
     trainer_config: tp.Dict[str, tp.Any],
     checkpoint_config: tp.Dict[str, tp.Any],
+    wandb_config: tp.Optional[tp.Dict[str, tp.Any]],
     output_dir: tp.Union[str, Path],
 ) -> pl.Trainer:
     output_dir = Path(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
 
     callbacks = [LearningRateMonitor(logging_interval="step")]
-    checkpoint_kwargs: tp.Dict[str, tp.Any] = {
-        "dirpath": checkpoint_config.get("dirpath", str(output_dir / "checkpoints")),
-        "filename": checkpoint_config.get("filename", "step={step}"),
-        "save_last": checkpoint_config.get("save_last", True),
-    }
+    checkpoint_enabled = checkpoint_config.get("enabled", True)
+    if checkpoint_enabled:
+        checkpoint_kwargs: tp.Dict[str, tp.Any] = {
+            "dirpath": checkpoint_config.get("dirpath", str(output_dir / "checkpoints")),
+            "filename": checkpoint_config.get("filename", "step={step}"),
+            "save_last": checkpoint_config.get("save_last", True),
+            "save_weights_only": checkpoint_config.get("save_weights_only", False),
+        }
 
-    if checkpoint_config.get("monitor"):
-        checkpoint_kwargs.update(
-            {
-                "monitor": checkpoint_config["monitor"],
-                "mode": checkpoint_config.get("mode", "min"),
-                "save_top_k": checkpoint_config.get("save_top_k", 2),
-            }
-        )
-    else:
-        checkpoint_kwargs.update(
-            {
-                "save_top_k": checkpoint_config.get("save_top_k", -1),
-                "every_n_train_steps": checkpoint_config.get("every_n_train_steps", 1000),
-            }
-        )
-    callbacks.append(ModelCheckpoint(**checkpoint_kwargs))
+        if checkpoint_config.get("monitor"):
+            checkpoint_kwargs.update(
+                {
+                    "monitor": checkpoint_config["monitor"],
+                    "mode": checkpoint_config.get("mode", "min"),
+                    "save_top_k": checkpoint_config.get("save_top_k", 2),
+                }
+            )
+        else:
+            checkpoint_kwargs.update(
+                {
+                    "save_top_k": checkpoint_config.get("save_top_k", -1),
+                    "every_n_train_steps": checkpoint_config.get("every_n_train_steps", 1000),
+                }
+            )
+        callbacks.append(ModelCheckpoint(**checkpoint_kwargs))
 
-    logger = CSVLogger(save_dir=str(output_dir), name=trainer_config.get("logger_name", "logs"))
+    loggers: tp.List[tp.Any] = [CSVLogger(save_dir=str(output_dir), name=trainer_config.get("logger_name", "logs"))]
+    wandb_config = wandb_config or {}
+    if wandb_config.get("enabled", False):
+        api_key = wandb_config.get("api_key")
+        if api_key:
+            os.environ["WANDB_API_KEY"] = api_key
+        for env_key in ("project", "entity", "name", "notes", "group", "job_type", "tags"):
+            env_value = wandb_config.get(env_key)
+            if env_value is None:
+                continue
+            if isinstance(env_value, list):
+                env_value = ",".join(str(item) for item in env_value)
+            os.environ.setdefault(f"WANDB_{env_key.upper()}", str(env_value))
+
+        loggers.append(
+            WandbLogger(
+                project=wandb_config.get("project", "audiox-finetune"),
+                entity=wandb_config.get("entity"),
+                name=wandb_config.get("name"),
+                save_dir=str(output_dir),
+                offline=wandb_config.get("offline", False),
+                log_model=wandb_config.get("log_model", False),
+                tags=wandb_config.get("tags"),
+                notes=wandb_config.get("notes"),
+                group=wandb_config.get("group"),
+                job_type=wandb_config.get("job_type"),
+                config=wandb_config.get("config"),
+            )
+        )
 
     trainer_kwargs = {
         "accelerator": trainer_config.get("accelerator", "auto"),
@@ -349,8 +383,9 @@ def create_trainer(
         "gradient_clip_val": trainer_config.get("gradient_clip_val", 0.0),
         "log_every_n_steps": trainer_config.get("log_every_n_steps", 10),
         "callbacks": callbacks,
-        "logger": logger,
+        "logger": loggers[0] if len(loggers) == 1 else loggers,
         "num_sanity_val_steps": trainer_config.get("num_sanity_val_steps", 0),
+        "enable_checkpointing": checkpoint_enabled,
     }
 
     for optional_key in ("limit_train_batches", "limit_val_batches", "val_check_interval"):
@@ -364,6 +399,7 @@ def run_finetune(config_path: tp.Union[str, Path]) -> tp.Dict[str, tp.Any]:
     run_config = _load_json(config_path)
     output_dir = Path(run_config.get("output_dir", "./outputs/audiox_finetune")).resolve()
     output_dir.mkdir(parents=True, exist_ok=True)
+    checkpoint_config = run_config.get("checkpointing", {})
 
     model, model_config, artifact_paths = load_model_and_config(run_config)
     lora_info = maybe_apply_lora(model, run_config)
@@ -381,7 +417,8 @@ def run_finetune(config_path: tp.Union[str, Path]) -> tp.Dict[str, tp.Any]:
     )
     trainer = create_trainer(
         run_config.get("trainer", {}),
-        run_config.get("checkpointing", {}),
+        checkpoint_config,
+        run_config.get("wandb"),
         output_dir,
     )
 
@@ -397,11 +434,30 @@ def run_finetune(config_path: tp.Union[str, Path]) -> tp.Dict[str, tp.Any]:
         )
 
     final_checkpoint_path = None
-    if trainer.global_step > 0:
-        final_checkpoint_dir = Path(run_config.get("checkpointing", {}).get("dirpath", output_dir / "checkpoints"))
+    save_final_checkpoint = checkpoint_config.get("save_final_checkpoint", checkpoint_config.get("enabled", True))
+    if trainer.global_step > 0 and save_final_checkpoint:
+        final_checkpoint_dir = Path(checkpoint_config.get("dirpath", output_dir / "checkpoints"))
         final_checkpoint_dir.mkdir(parents=True, exist_ok=True)
-        final_checkpoint_path = final_checkpoint_dir / run_config.get("final_checkpoint_name", "final-step.ckpt")
-        trainer.save_checkpoint(str(final_checkpoint_path))
+        if checkpoint_config.get("save_lora_only", False):
+            if lora_info is None:
+                raise ValueError("checkpointing.save_lora_only requires LoRA to be enabled.")
+            final_checkpoint_path = final_checkpoint_dir / run_config.get(
+                "final_checkpoint_name", "final-lora-state.pt"
+            )
+            torch.save(
+                {
+                    "global_step": trainer.global_step,
+                    "lora_info": lora_info,
+                    "lora_state_dict": extract_lora_state_dict(training_wrapper.diffusion),
+                },
+                final_checkpoint_path,
+            )
+        else:
+            final_checkpoint_path = final_checkpoint_dir / run_config.get("final_checkpoint_name", "final-step.ckpt")
+            trainer.save_checkpoint(
+                str(final_checkpoint_path),
+                weights_only=checkpoint_config.get("save_weights_only", False),
+            )
 
     return {
         "artifact_paths": artifact_paths,

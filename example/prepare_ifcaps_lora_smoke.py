@@ -44,6 +44,10 @@ def build_run_config(
     train_manifest: str,
     cache_dir: str,
     pretrained_name: str,
+    run_name: str,
+    wandb_project: str,
+    wandb_entity: str | None = None,
+    wandb_offline: bool = False,
 ) -> dict:
     return {
         "output_dir": output_dir,
@@ -89,10 +93,11 @@ def build_run_config(
         },
         "checkpointing": {
             "dirpath": f"{output_dir}/checkpoints",
-            "filename": "step={step}",
+            "enabled": False,
             "save_last": False,
-            "save_top_k": -1,
-            "every_n_train_steps": 1,
+            "save_top_k": 0,
+            "every_n_train_steps": 0,
+            "save_final_checkpoint": False,
         },
         "lora": {
             "enabled": True,
@@ -111,6 +116,14 @@ def build_run_config(
                 "gating_network.0",
                 "gating_network.2",
             ],
+        },
+        "wandb": {
+            "enabled": True,
+            "project": wandb_project,
+            "entity": wandb_entity,
+            "name": run_name,
+            "offline": wandb_offline,
+            "log_model": False,
         },
     }
 
@@ -134,6 +147,21 @@ def main() -> None:
         default="HKUSTAudio/AudioX-MAF-MMDiT",
         help="Hugging Face model identifier to fine-tune from.",
     )
+    parser.add_argument(
+        "--wandb-project",
+        default="audiox-finetune",
+        help="Weights & Biases project name for the smoke run.",
+    )
+    parser.add_argument(
+        "--wandb-entity",
+        default=None,
+        help="Optional Weights & Biases entity.",
+    )
+    parser.add_argument(
+        "--wandb-offline",
+        action="store_true",
+        help="Enable offline Weights & Biases logging.",
+    )
     args = parser.parse_args()
 
     label_path = Path(args.label)
@@ -153,6 +181,10 @@ def main() -> None:
         train_manifest=str(train_manifest_path),
         cache_dir=args.cache_dir,
         pretrained_name=args.pretrained_name,
+        run_name=f"ifcaps-lora-smoke-{label.get('clip_id', label_path.stem)}",
+        wandb_project=args.wandb_project,
+        wandb_entity=args.wandb_entity,
+        wandb_offline=args.wandb_offline,
     )
     config_path = output_dir / "config_cuda_lora.json"
     config_path.write_text(json.dumps(run_config, indent=2))

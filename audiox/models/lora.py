@@ -127,3 +127,11 @@ def count_parameters(module: nn.Module) -> tp.Tuple[int, int]:
         if param.requires_grad:
             trainable += numel
     return trainable, total
+
+
+def extract_lora_state_dict(module: nn.Module) -> tp.Dict[str, torch.Tensor]:
+    lora_state: tp.Dict[str, torch.Tensor] = {}
+    for name, value in module.state_dict().items():
+        if ".lora_a." in name or ".lora_b." in name:
+            lora_state[name] = value.detach().cpu()
+    return lora_state
