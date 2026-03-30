@@ -9,11 +9,19 @@ from huggingface_hub import hf_hub_download
 from pytorch_lightning.callbacks import LearningRateMonitor, ModelCheckpoint
 from pytorch_lightning.loggers import CSVLogger, WandbLogger
 import torch
-from torch.utils.data import DataLoader
+from torch.utils.data import DataLoader, WeightedRandomSampler
 
 from ..data.ifcaps import IFCapsFineTuneDataset, collate_audiox_batch
 from ..models.factory import create_model_from_config
-from ..models.lora import count_parameters, extract_lora_state_dict, inject_lora
+from ..models.lora import (
+    LoRALinear,
+    count_parameters,
+    extract_lora_state_dict,
+    extract_parameter_state_dict,
+    inject_lora,
+    load_lora_checkpoint,
+    is_lora_parameter_name,
+)
 from ..models.utils import load_ckpt_state_dict
 from .factory import create_training_wrapper_from_config
 from .utils import copy_state_dict
@@ -161,7 +169,7 @@ def _resolve_local_artifacts(run_config: tp.Dict[str, tp.Any]) -> tp.Dict[str, t
     }
 
 
-def _extract_audio_prompt_num_samples(
+def extract_audio_prompt_num_samples(
     model_config: tp.Dict[str, tp.Any], fallback_sample_size: int
 ) -> int:
     conditioning_configs = model_config.get("model", {}).get("conditioning", {}).get("configs", [])
@@ -180,6 +188,124 @@ def _extract_audio_prompt_num_samples(
             return latent_seq_len * downsampling_ratio
 
     return fallback_sample_size
+
+
+def _unfreeze_module(module: tp.Any) -> tp.List[str]:
+    unfrozen = []
+    if module is None:
+        return unfrozen
+    for name, parameter in module.named_parameters():
+        parameter.requires_grad = True
+        unfrozen.append(name)
+    return unfrozen
+
+
+def _active_conditioner_ids(
+    model_config: tp.Dict[str, tp.Any], data_config: tp.Optional[tp.Dict[str, tp.Any]] = None
+) -> tp.Set[str]:
+    active = {"text_prompt"}
+    data_config = data_config or {}
+    if data_config.get("include_audio_conditioning", False):
+        active.add("audio_prompt")
+    if data_config.get("include_video_conditioning", False):
+        active.add("video_prompt")
+
+    conditioning = model_config.get("model", {}).get("conditioning", {})
+    defined_ids = {conditioner.get("id") for conditioner in conditioning.get("configs", [])}
+    return {conditioner_id for conditioner_id in active if conditioner_id in defined_ids}
+
+
+def apply_trainable_scope(
+    model: tp.Any,
+    model_config: tp.Dict[str, tp.Any],
+    run_config: tp.Dict[str, tp.Any],
+) -> tp.Optional[tp.Dict[str, tp.Any]]:
+    training_config = run_config.get("training") or {}
+    scope = training_config.get("trainable_scope")
+    if not scope:
+        return None
+
+    if scope != "asmr_continuation_lora":
+        raise ValueError(f"Unsupported training.trainable_scope: {scope}")
+
+    for _, parameter in model.named_parameters():
+        parameter.requires_grad = False
+
+    lora_parameter_names = []
+    for name, parameter in model.named_parameters():
+        if is_lora_parameter_name(name):
+            parameter.requires_grad = True
+            lora_parameter_names.append(name)
+
+    unfrozen_modules: tp.List[str] = []
+    if hasattr(model, "maf_block"):
+        _unfreeze_module(model.maf_block)
+        unfrozen_modules.append("maf_block")
+
+    conditioner_registry = getattr(getattr(model, "conditioner", None), "conditioners", {})
+    for conditioner_id in _active_conditioner_ids(model_config, run_config.get("data")):
+        conditioner = conditioner_registry[conditioner_id] if conditioner_id in conditioner_registry else None
+        if conditioner is None:
+            continue
+
+        for child_name, child_module in conditioner.named_children():
+            if child_name.startswith("proj"):
+                _unfreeze_module(child_module)
+                unfrozen_modules.append(f"conditioner.{conditioner_id}.{child_name}")
+
+        if hasattr(conditioner, "empty_audio_feat"):
+            conditioner.empty_audio_feat.requires_grad = True
+            unfrozen_modules.append(f"conditioner.{conditioner_id}.empty_audio_feat")
+
+    trainable_params, total_params = count_parameters(model)
+    all_trainable_parameter_names = [
+        name for name, parameter in model.named_parameters() if parameter.requires_grad
+    ]
+    non_lora_parameter_names = [
+        name for name in all_trainable_parameter_names if not is_lora_parameter_name(name)
+    ]
+    return {
+        "scope": scope,
+        "lora_parameter_names": lora_parameter_names,
+        "non_lora_parameter_names": non_lora_parameter_names,
+        "all_trainable_parameter_names": all_trainable_parameter_names,
+        "unfrozen_modules": unfrozen_modules,
+        "trainable_params": trainable_params,
+        "total_params": total_params,
+    }
+
+
+def build_sample_weights(
+    records: tp.Sequence[tp.Dict[str, tp.Any]],
+    *,
+    sample_strategy: str = "uniform",
+    standalone_ratio: float = 0.3,
+    continuation_ratio: float = 0.7,
+) -> tp.Optional[tp.List[float]]:
+    if sample_strategy != "weighted":
+        return None
+
+    type_to_records: tp.Dict[str, tp.List[int]] = {"standalone": [], "continuation": []}
+    for index, record in enumerate(records):
+        sample_type = record.get("sample_type")
+        if sample_type in type_to_records:
+            type_to_records[sample_type].append(index)
+
+    if not type_to_records["standalone"] or not type_to_records["continuation"]:
+        return None
+
+    desired_ratios = {
+        "standalone": float(standalone_ratio),
+        "continuation": float(continuation_ratio),
+    }
+    weights = [1.0] * len(records)
+    for sample_type, indices in type_to_records.items():
+        if not indices:
+            continue
+        per_sample_weight = desired_ratios[sample_type] / len(indices)
+        for index in indices:
+            weights[index] = per_sample_weight
+    return weights
 
 
 def load_model_and_config(
@@ -205,6 +331,9 @@ def load_model_and_config(
 
     model = create_model_from_config(model_config)
     copy_state_dict(model, load_ckpt_state_dict(artifact_paths["model_ckpt_path"]))
+    adapter_checkpoint_path = run_config.get("adapter_ckpt_path") or run_config.get("lora_path")
+    if adapter_checkpoint_path:
+        load_lora_checkpoint(model, adapter_checkpoint_path)
     return model, model_config, artifact_paths
 
 
@@ -223,7 +352,11 @@ def maybe_apply_lora(model: tp.Any, run_config: tp.Dict[str, tp.Any]) -> tp.Opti
         freeze_non_lora=lora_config.get("freeze_non_lora", True),
     )
     if not replaced_modules:
-        raise ValueError("LoRA was enabled, but no matching Linear modules were found for injection.")
+        reused_modules = [name for name, module in model.named_modules() if isinstance(module, LoRALinear)]
+        if reused_modules:
+            replaced_modules = reused_modules
+        else:
+            raise ValueError("LoRA was enabled, but no matching Linear modules were found for injection.")
 
     trainable_params, total_params = count_parameters(model)
     return {
@@ -245,9 +378,10 @@ def create_finetune_dataloaders(
     model_name = pretrained_name or data_config.get("model_name", "AudioX")
     sample_rate = model_config["sample_rate"]
     sample_size = model_config["sample_size"]
+    sample_seconds = sample_size / sample_rate
     video_fps = model_config.get("video_fps", data_config.get("video_fps", 5))
     num_workers = data_config.get("num_workers", 0)
-    audio_prompt_num_samples = _extract_audio_prompt_num_samples(model_config, sample_size)
+    audio_prompt_num_samples = extract_audio_prompt_num_samples(model_config, sample_size)
 
     shared_dataset_kwargs = {
         "sample_rate": sample_rate,
@@ -260,7 +394,7 @@ def create_finetune_dataloaders(
         "include_video_conditioning": data_config.get("include_video_conditioning", False),
         "include_audio_conditioning": data_config.get("include_audio_conditioning", False),
         "video_fps": video_fps,
-        "video_duration_seconds": data_config.get("video_duration_seconds", 10.0),
+        "video_duration_seconds": data_config.get("video_duration_seconds", sample_seconds),
         "audio_prompt_num_samples": data_config.get("audio_prompt_num_samples", audio_prompt_num_samples),
         "synchformer_ckpt_path": artifact_paths.get("synchformer_ckpt_path"),
         "compute_video_sync_on_the_fly": data_config.get("compute_video_sync_on_the_fly", False),
@@ -272,10 +406,20 @@ def create_finetune_dataloaders(
         seed=data_config.get("seed", 0),
         **shared_dataset_kwargs,
     )
+    sample_weights = build_sample_weights(
+        train_dataset.records,
+        sample_strategy=data_config.get("sample_strategy", "uniform"),
+        standalone_ratio=data_config.get("standalone_ratio", 0.3),
+        continuation_ratio=data_config.get("continuation_ratio", 0.7),
+    )
+    train_sampler = None
+    if sample_weights is not None:
+        train_sampler = WeightedRandomSampler(sample_weights, num_samples=len(sample_weights), replacement=True)
     train_loader = DataLoader(
         train_dataset,
         batch_size=data_config.get("batch_size", 1),
-        shuffle=True,
+        shuffle=train_sampler is None,
+        sampler=train_sampler,
         num_workers=num_workers,
         collate_fn=collate_audiox_batch,
         drop_last=data_config.get("drop_last", False),
@@ -403,6 +547,12 @@ def run_finetune(config_path: tp.Union[str, Path]) -> tp.Dict[str, tp.Any]:
 
     model, model_config, artifact_paths = load_model_and_config(run_config)
     lora_info = maybe_apply_lora(model, run_config)
+    trainable_scope_info = apply_trainable_scope(model, model_config, run_config)
+    trainable_params, total_params = count_parameters(model)
+    if lora_info is not None:
+        lora_info["trainable_params"] = trainable_params
+        lora_info["total_params"] = total_params
+        lora_info["trainable_scope"] = trainable_scope_info
 
     resolved_config_path = output_dir / "resolved_model_config.json"
     with resolved_config_path.open("w") as handle:
@@ -441,6 +591,12 @@ def run_finetune(config_path: tp.Union[str, Path]) -> tp.Dict[str, tp.Any]:
         if checkpoint_config.get("save_lora_only", False):
             if lora_info is None:
                 raise ValueError("checkpointing.save_lora_only requires LoRA to be enabled.")
+            trainable_scope_state_dict = {}
+            if trainable_scope_info:
+                trainable_scope_state_dict = extract_parameter_state_dict(
+                    training_wrapper.diffusion,
+                    trainable_scope_info.get("non_lora_parameter_names", []),
+                )
             final_checkpoint_path = final_checkpoint_dir / run_config.get(
                 "final_checkpoint_name", "final-lora-state.pt"
             )
@@ -448,6 +604,9 @@ def run_finetune(config_path: tp.Union[str, Path]) -> tp.Dict[str, tp.Any]:
                 {
                     "global_step": trainer.global_step,
                     "lora_info": lora_info,
+                    "lora_config": run_config.get("lora"),
+                    "trainable_scope_info": trainable_scope_info,
+                    "trainable_scope_state_dict": trainable_scope_state_dict,
                     "lora_state_dict": extract_lora_state_dict(training_wrapper.diffusion),
                 },
                 final_checkpoint_path,
@@ -463,6 +622,7 @@ def run_finetune(config_path: tp.Union[str, Path]) -> tp.Dict[str, tp.Any]:
         "artifact_paths": artifact_paths,
         "model_config": model_config,
         "lora_info": lora_info,
+        "trainable_scope_info": trainable_scope_info,
         "output_dir": str(output_dir),
         "resolved_model_config_path": str(resolved_config_path),
         "final_checkpoint_path": str(final_checkpoint_path) if final_checkpoint_path else None,

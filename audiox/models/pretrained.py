@@ -2,13 +2,14 @@ import json
 import copy
 
 from .factory import create_model_from_config
+from .lora import load_lora_checkpoint
 from .utils import load_ckpt_state_dict
 
 from huggingface_hub import hf_hub_download
 
-def _download_optional_file(name: str, filename: str):
+def _download_optional_file(name: str, filename: str, cache_dir=None):
     try:
-        return hf_hub_download(name, filename=filename, repo_type='model')
+        return hf_hub_download(name, filename=filename, repo_type='model', cache_dir=cache_dir)
     except Exception:
         return None
 
@@ -26,20 +27,20 @@ def _patch_pretransform_ckpt_paths(node, vae_ckpt_path):
         for item in node:
             _patch_pretransform_ckpt_paths(item, vae_ckpt_path)
 
-def download_pretrained_artifacts(name: str):
-    model_ckpt_path = _download_optional_file(name, "model.safetensors")
+def download_pretrained_artifacts(name: str, cache_dir=None):
+    model_ckpt_path = _download_optional_file(name, "model.safetensors", cache_dir=cache_dir)
     if model_ckpt_path is None:
-        model_ckpt_path = hf_hub_download(name, filename="model.ckpt", repo_type='model')
+        model_ckpt_path = hf_hub_download(name, filename="model.ckpt", repo_type='model', cache_dir=cache_dir)
 
     return {
-        "config_path": hf_hub_download(name, filename="config.json", repo_type='model'),
+        "config_path": hf_hub_download(name, filename="config.json", repo_type='model', cache_dir=cache_dir),
         "model_ckpt_path": model_ckpt_path,
-        "vae_ckpt_path": _download_optional_file(name, "VAE.ckpt"),
-        "synchformer_ckpt_path": _download_optional_file(name, "synchformer_state_dict.pth"),
+        "vae_ckpt_path": _download_optional_file(name, "VAE.ckpt", cache_dir=cache_dir),
+        "synchformer_ckpt_path": _download_optional_file(name, "synchformer_state_dict.pth", cache_dir=cache_dir),
     }
 
-def get_pretrained_model(name: str):
-    artifact_paths = download_pretrained_artifacts(name)
+def get_pretrained_model(name: str, cache_dir=None, lora_path=None):
+    artifact_paths = download_pretrained_artifacts(name, cache_dir=cache_dir)
 
     with open(artifact_paths["config_path"]) as f:
         model_config = json.load(f)
@@ -49,5 +50,7 @@ def get_pretrained_model(name: str):
     model = create_model_from_config(model_config)
 
     model.load_state_dict(load_ckpt_state_dict(artifact_paths["model_ckpt_path"]))
+    if lora_path is not None:
+        load_lora_checkpoint(model, lora_path)
 
     return model, model_config
