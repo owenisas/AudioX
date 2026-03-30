@@ -114,10 +114,15 @@ class Stereo(nn.Module):
 import os
 import math
 import subprocess as sp
-from decord import VideoReader, cpu
 import torch
 import torchvision.transforms as transforms
 from PIL import Image
+
+try:
+    from decord import VideoReader, cpu
+except ImportError:
+    VideoReader = None
+    cpu = None
 
 
 def adjust_video_duration(video_tensor, duration, target_fps):
@@ -143,6 +148,9 @@ def read_video(filepath, seek_time=0., duration=-1, target_fps=2):
         frame = frame.repeat(int(math.ceil(target_frames / frame.shape[0])), 1, 1, 1)[:target_frames]
         assert frame.shape[0] == target_frames, f"The shape of frame is {frame.shape}"
         return frame
+
+    if VideoReader is None or cpu is None:
+        raise ImportError("decord is required to read video inputs. Install decord or omit video_path.")
 
     vr = VideoReader(filepath, ctx=cpu(0))
     fps = vr.get_avg_fps()

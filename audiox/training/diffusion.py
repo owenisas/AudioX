@@ -273,7 +273,7 @@ class DiffusionCondTrainingWrapper(pl.LightningModule):
 
         self.diffusion_objective = model.diffusion_objective
 
-        if 'dasheng-loss' in optimizer_configs and optimizer_configs['dasheng-loss'].get('if_add_dasheng_loss', False):
+        if optimizer_configs is not None and 'dasheng-loss' in optimizer_configs and optimizer_configs['dasheng-loss'].get('if_add_dasheng_loss', False):
             dasheng_align_weight = optimizer_configs['dasheng-loss']['config']['weight']
             model_path = optimizer_configs['dasheng-loss']['model_path']
             from transformers import AutoModel, AutoFeatureExtractor
@@ -373,7 +373,13 @@ class DiffusionCondTrainingWrapper(pl.LightningModule):
 
         # Create batch tensor of attention masks from the "mask" field of the metadata array
         if use_padding_mask:
-            padding_masks = torch.stack([md["padding_mask"][0] for md in metadata], dim=0).to(self.device) # Shape (batch_size, sequence_length)
+            padding_masks = []
+            for md in metadata:
+                if md["padding_mask"].ndim == 1:
+                    padding_masks.append(md["padding_mask"])
+                else:
+                    padding_masks.append(md["padding_mask"][0])
+            padding_masks = torch.stack(padding_masks, dim=0).to(self.device) # Shape (batch_size, sequence_length)
 
         p.tick("conditioning")
 
@@ -530,7 +536,13 @@ class DiffusionCondTrainingWrapper(pl.LightningModule):
 
         # Create batch tensor of attention masks from the "mask" field of the metadata array
         if use_padding_mask:
-            padding_masks = torch.stack([md["padding_mask"][0] for md in metadata], dim=0).to(self.device) # Shape (batch_size, sequence_length)
+            padding_masks = []
+            for md in metadata:
+                if md["padding_mask"].ndim == 1:
+                    padding_masks.append(md["padding_mask"])
+                else:
+                    padding_masks.append(md["padding_mask"][0])
+            padding_masks = torch.stack(padding_masks, dim=0).to(self.device) # Shape (batch_size, sequence_length)
 
         p.tick("conditioning")
 

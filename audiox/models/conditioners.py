@@ -938,15 +938,17 @@ class MultiConditioner(nn.Module):
         output = {}
 
         for key, conditioner in self.conditioners.items():
-            condition_key = key
-
             conditioner_inputs = []
 
             for x in batch_metadata:
+                condition_key = key
 
                 if condition_key not in x:
                     if condition_key in self.default_keys:
                         condition_key = self.default_keys[condition_key]
+                    elif condition_key == "text_prompt" and "prompt" in x:
+                        # Backward compatibility for older metadata payloads.
+                        condition_key = "prompt"
                     else:
                         raise ValueError(f"Conditioner key {condition_key} not found in batch metadata")
 
@@ -973,7 +975,9 @@ def create_multi_conditioner_from_conditioning_config(config: tp.Dict[str, tp.An
     conditioners = {}
     cond_dim = config["cond_dim"]
     
-    default_keys = config.get("default_keys", {})
+    default_keys = dict(config.get("default_keys", {}))
+    if "text_prompt" not in default_keys:
+        default_keys["text_prompt"] = "prompt"
 
     for conditioner_info in config["configs"]:
         id = conditioner_info["id"]

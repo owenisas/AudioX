@@ -172,7 +172,7 @@ class ConditionedDiffusionModelWrapper(nn.Module):
                 audio_feature = cross_attention_input[2]
 
                 if self.gate_type == "MAF":
-                    refined_branches = self.maf_block(text_feature, video_feature, audio_feature)
+                    refined_branches = self.maf_block(video_feature, text_feature, audio_feature)
                     cross_attention_input = torch.cat(list(refined_branches.values()), dim=1)
 
             else:
