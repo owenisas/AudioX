@@ -11,6 +11,7 @@ from torch.utils.data import DataLoader
 
 from ..data.ifcaps import IFCapsFineTuneDataset, collate_audiox_batch
 from ..models.factory import create_model_from_config
+from ..models.lora import count_parameters, inject_lora
 from ..models.utils import load_ckpt_state_dict
 from .factory import create_training_wrapper_from_config
 from .utils import copy_state_dict
@@ -72,6 +73,48 @@ def _patch_pretransform_ckpt_paths(node: tp.Any, vae_ckpt_path: tp.Optional[str]
             _patch_pretransform_ckpt_paths(item, vae_ckpt_path)
 
 
+def _conditioner_seq_len_for_mmdit(conditioner: tp.Dict[str, tp.Any]) -> tp.Optional[int]:
+    conditioner_type = conditioner.get("type")
+    conditioner_config = conditioner.get("config", {})
+
+    if conditioner_type == "clip-with-sync-w-empty-feat":
+        return conditioner_config.get("out_features", 128)
+
+    if conditioner_type == "audio_autoencoder_v2":
+        return 128
+
+    return None
+
+
+def _cap_text_length_for_mmdit_budget(model_config: tp.Dict[str, tp.Any], requested_text_max_length: int) -> int:
+    model_section = model_config.get("model", {})
+    diffusion = model_section.get("diffusion", {})
+    conditioning = model_section.get("conditioning", {})
+    cross_attention_ids = diffusion.get("cross_attention_cond_ids", [])
+
+    if diffusion.get("type") != "mmdit" or "text_prompt" not in cross_attention_ids:
+        return requested_text_max_length
+
+    # The current MMDiT implementation projects multimodal conditioning from a fixed
+    # sequence length of 384 tokens before matching the latent sequence length.
+    fixed_mm_token_budget = 384
+    remaining_budget = fixed_mm_token_budget
+
+    for conditioner in conditioning.get("configs", []):
+        conditioner_id = conditioner.get("id")
+        if conditioner_id not in cross_attention_ids or conditioner_id == "text_prompt":
+            continue
+
+        conditioner_seq_len = _conditioner_seq_len_for_mmdit(conditioner)
+        if conditioner_seq_len is not None:
+            remaining_budget -= conditioner_seq_len
+
+    if remaining_budget <= 0:
+        return requested_text_max_length
+
+    return min(requested_text_max_length, remaining_budget)
+
+
 def apply_finetune_defaults(
     model_config: tp.Dict[str, tp.Any],
     text_max_length: int = 256,
@@ -83,6 +126,7 @@ def apply_finetune_defaults(
     conditioning = model_section.setdefault("conditioning", {})
     default_keys = conditioning.setdefault("default_keys", {})
     default_keys.setdefault("text_prompt", "prompt")
+    text_max_length = _cap_text_length_for_mmdit_budget(patched_config, text_max_length)
 
     for conditioner in conditioning.get("configs", []):
         if conditioner.get("id") == "text_prompt" and conditioner.get("type") == "t5":
@@ -90,7 +134,7 @@ def apply_finetune_defaults(
             current_max_length = conditioner["config"].get("max_length", 0)
             conditioner["config"]["max_length"] = max(current_max_length, text_max_length)
 
-    training = model_section.setdefault("training", {})
+    training = patched_config.setdefault("training", {})
     training_defaults = {
         "learning_rate": 1e-5,
         "use_ema": True,
@@ -113,6 +157,27 @@ def _resolve_local_artifacts(run_config: tp.Dict[str, tp.Any]) -> tp.Dict[str, t
         "vae_ckpt_path": auxiliary_files.get("vae_ckpt_path"),
         "synchformer_ckpt_path": auxiliary_files.get("synchformer_ckpt_path"),
     }
+
+
+def _extract_audio_prompt_num_samples(
+    model_config: tp.Dict[str, tp.Any], fallback_sample_size: int
+) -> int:
+    conditioning_configs = model_config.get("model", {}).get("conditioning", {}).get("configs", [])
+    for conditioner in conditioning_configs:
+        if conditioner.get("id") != "audio_prompt":
+            continue
+
+        conditioner_config = conditioner.get("config", {})
+        latent_seq_len = conditioner_config.get("latent_seq_len")
+        downsampling_ratio = (
+            conditioner_config.get("pretransform_config", {})
+            .get("config", {})
+            .get("downsampling_ratio")
+        )
+        if isinstance(latent_seq_len, int) and latent_seq_len > 0 and isinstance(downsampling_ratio, int) and downsampling_ratio > 0:
+            return latent_seq_len * downsampling_ratio
+
+    return fallback_sample_size
 
 
 def load_model_and_config(
@@ -141,6 +206,31 @@ def load_model_and_config(
     return model, model_config, artifact_paths
 
 
+def maybe_apply_lora(model: tp.Any, run_config: tp.Dict[str, tp.Any]) -> tp.Optional[tp.Dict[str, tp.Any]]:
+    lora_config = run_config.get("lora") or {}
+    if not lora_config.get("enabled", False):
+        return None
+
+    replaced_modules = inject_lora(
+        model,
+        rank=lora_config.get("rank", 8),
+        alpha=lora_config.get("alpha", 16.0),
+        dropout=lora_config.get("dropout", 0.0),
+        target_patterns=lora_config.get("target_patterns"),
+        exclude_patterns=lora_config.get("exclude_patterns"),
+        freeze_non_lora=lora_config.get("freeze_non_lora", True),
+    )
+    if not replaced_modules:
+        raise ValueError("LoRA was enabled, but no matching Linear modules were found for injection.")
+
+    trainable_params, total_params = count_parameters(model)
+    return {
+        "replaced_modules": replaced_modules,
+        "trainable_params": trainable_params,
+        "total_params": total_params,
+    }
+
+
 def create_finetune_dataloaders(
     data_config: tp.Dict[str, tp.Any],
     model_config: tp.Dict[str, tp.Any],
@@ -155,6 +245,7 @@ def create_finetune_dataloaders(
     sample_size = model_config["sample_size"]
     video_fps = model_config.get("video_fps", data_config.get("video_fps", 5))
     num_workers = data_config.get("num_workers", 0)
+    audio_prompt_num_samples = _extract_audio_prompt_num_samples(model_config, sample_size)
 
     shared_dataset_kwargs = {
         "sample_rate": sample_rate,
@@ -167,6 +258,8 @@ def create_finetune_dataloaders(
         "include_video_conditioning": data_config.get("include_video_conditioning", False),
         "include_audio_conditioning": data_config.get("include_audio_conditioning", False),
         "video_fps": video_fps,
+        "video_duration_seconds": data_config.get("video_duration_seconds", 10.0),
+        "audio_prompt_num_samples": data_config.get("audio_prompt_num_samples", audio_prompt_num_samples),
         "synchformer_ckpt_path": artifact_paths.get("synchformer_ckpt_path"),
         "compute_video_sync_on_the_fly": data_config.get("compute_video_sync_on_the_fly", False),
     }
@@ -273,6 +366,7 @@ def run_finetune(config_path: tp.Union[str, Path]) -> tp.Dict[str, tp.Any]:
     output_dir.mkdir(parents=True, exist_ok=True)
 
     model, model_config, artifact_paths = load_model_and_config(run_config)
+    lora_info = maybe_apply_lora(model, run_config)
 
     resolved_config_path = output_dir / "resolved_model_config.json"
     with resolved_config_path.open("w") as handle:
@@ -302,11 +396,20 @@ def run_finetune(config_path: tp.Union[str, Path]) -> tp.Dict[str, tp.Any]:
             ckpt_path=resume_from_checkpoint,
         )
 
+    final_checkpoint_path = None
+    if trainer.global_step > 0:
+        final_checkpoint_dir = Path(run_config.get("checkpointing", {}).get("dirpath", output_dir / "checkpoints"))
+        final_checkpoint_dir.mkdir(parents=True, exist_ok=True)
+        final_checkpoint_path = final_checkpoint_dir / run_config.get("final_checkpoint_name", "final-step.ckpt")
+        trainer.save_checkpoint(str(final_checkpoint_path))
+
     return {
         "artifact_paths": artifact_paths,
         "model_config": model_config,
+        "lora_info": lora_info,
         "output_dir": str(output_dir),
         "resolved_model_config_path": str(resolved_config_path),
+        "final_checkpoint_path": str(final_checkpoint_path) if final_checkpoint_path else None,
         "trainer": trainer,
         "training_wrapper": training_wrapper,
     }

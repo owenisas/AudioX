@@ -397,6 +397,8 @@ class IFCapsFineTuneDataset(Dataset):
         include_video_conditioning: bool = False,
         include_audio_conditioning: bool = False,
         video_fps: int = 5,
+        video_duration_seconds: float = 10.0,
+        audio_prompt_num_samples: tp.Optional[int] = None,
         random_crop: bool = True,
         seed: int = 0,
         synchformer_ckpt_path: tp.Optional[tp.Union[str, Path]] = None,
@@ -414,6 +416,8 @@ class IFCapsFineTuneDataset(Dataset):
         self.include_video_conditioning = include_video_conditioning
         self.include_audio_conditioning = include_audio_conditioning
         self.video_fps = video_fps
+        self.video_duration_seconds = video_duration_seconds
+        self.audio_prompt_num_samples = audio_prompt_num_samples or sample_size
         self.seed = seed
         self.synchformer_ckpt_path = str(synchformer_ckpt_path) if synchformer_ckpt_path else None
         self.compute_video_sync_on_the_fly = compute_video_sync_on_the_fly
@@ -461,6 +465,18 @@ class IFCapsFineTuneDataset(Dataset):
             "video_tensors": torch.zeros(1, frame_count, 3, 224, 224),
             "video_sync_frames": torch.zeros(1, 240, 768),
         }
+
+    def _resolve_video_duration(self, record: tp.Dict[str, tp.Any]) -> float:
+        explicit_duration = _to_float(record.get("video_duration_seconds"))
+        if explicit_duration is not None:
+            return explicit_duration
+
+        start = _to_float(record.get("start_s"))
+        end = _to_float(record.get("end_s"))
+        if start is not None and end is not None and end > start:
+            return end - start
+
+        return self.video_duration_seconds
 
     def _load_video_prompt(
         self,
@@ -513,15 +529,31 @@ class IFCapsFineTuneDataset(Dataset):
 
     def _load_audio_prompt(self, record: tp.Dict[str, tp.Any], seconds_start: int, clip_seconds: float) -> torch.Tensor:
         if not self.include_audio_conditioning:
-            return torch.zeros(1, 2, self.sample_size)
+            return torch.zeros(1, 2, self.audio_prompt_num_samples)
 
         audio_prompt_path = self._resolve_path(
             record.get("audio_prompt_path") or record.get("audio_conditioning_path") or record.get("audio_path")
         )
         if audio_prompt_path is None:
-            return torch.zeros(1, 2, self.sample_size)
+            return torch.zeros(1, 2, self.audio_prompt_num_samples)
 
-        audio_tensor = load_and_process_audio(str(audio_prompt_path), self.sample_rate, seconds_start, clip_seconds)
+        audio_prompt_seconds = _to_float(record.get("audio_prompt_duration_seconds"))
+        if audio_prompt_seconds is None:
+            audio_prompt_samples = _to_int(record.get("audio_prompt_num_samples"))
+            if audio_prompt_samples is None:
+                audio_prompt_samples = self.audio_prompt_num_samples
+            audio_prompt_seconds = audio_prompt_samples / self.sample_rate
+
+        audio_tensor = load_and_process_audio(
+            str(audio_prompt_path),
+            self.sample_rate,
+            seconds_start,
+            audio_prompt_seconds,
+        )
+        if audio_tensor.shape[-1] > self.audio_prompt_num_samples:
+            audio_tensor = audio_tensor[..., : self.audio_prompt_num_samples]
+        elif audio_tensor.shape[-1] < self.audio_prompt_num_samples:
+            audio_tensor = F.pad(audio_tensor, (0, self.audio_prompt_num_samples - audio_tensor.shape[-1]))
         return audio_tensor.unsqueeze(0)
 
     def __getitem__(self, index: int) -> tp.Tuple[torch.Tensor, tp.Dict[str, tp.Any]]:
@@ -534,6 +566,7 @@ class IFCapsFineTuneDataset(Dataset):
         waveform = self.stereo(waveform)
         chunk, _, _, seconds_start, seconds_total, padding_mask = self.pad_crop(waveform)
         clip_seconds = self.sample_size / self.sample_rate
+        video_seconds = self._resolve_video_duration(record)
 
         variant = None
         if self.prompt_format == "mixed":
@@ -551,7 +584,7 @@ class IFCapsFineTuneDataset(Dataset):
                     xml_max_events=self.xml_max_events,
                     mixed_variant=variant,
                 ),
-                "video_prompt": self._load_video_prompt(record, seconds_start, clip_seconds),
+                "video_prompt": self._load_video_prompt(record, seconds_start, video_seconds),
                 "audio_prompt": self._load_audio_prompt(record, seconds_start, clip_seconds),
                 "seconds_start": seconds_start,
                 "seconds_total": seconds_total,

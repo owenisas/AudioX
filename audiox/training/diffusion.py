@@ -346,7 +346,11 @@ class DiffusionCondTrainingWrapper(pl.LightningModule):
 
     def configure_optimizers(self):
         diffusion_opt_config = self.optimizer_configs['diffusion']
-        opt_diff = create_optimizer_from_config(diffusion_opt_config['optimizer'], self.diffusion.parameters())
+        trainable_parameters = [parameter for parameter in self.diffusion.parameters() if parameter.requires_grad]
+        if not trainable_parameters:
+            raise ValueError("No trainable diffusion parameters found for optimizer setup.")
+
+        opt_diff = create_optimizer_from_config(diffusion_opt_config['optimizer'], trainable_parameters)
 
         if "scheduler" in diffusion_opt_config:
             sched_diff = create_scheduler_from_config(diffusion_opt_config['scheduler'], opt_diff)

@@ -1028,6 +1028,8 @@ def create_multi_conditioner_from_conditioning_config(config: tp.Dict[str, tp.An
             pretransform = create_pretransform_from_config(conditioner_config.pop("pretransform_config"), sample_rate=sample_rate)
             if conditioner_config.get("pretransform_ckpt_path", None) is not None:
                 pretransform.load_state_dict(load_ckpt_state_dict(conditioner_config.pop("pretransform_ckpt_path")))
+            else:
+                conditioner_config.pop("pretransform_ckpt_path", None)
             conditioners[id] = AudioAutoencoderConditionerv2(pretransform, **conditioner_config)            
 
         else:

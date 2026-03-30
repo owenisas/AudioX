@@ -16,10 +16,11 @@ from audiox.data.ifcaps import (
     select_prompt_variant,
     serialize_ifcaps_to_xml,
 )
+from audiox.models.lora import LoRALinear, count_parameters, inject_lora
 from audiox.models.conditioners import MultiConditioner
 from audiox.models.diffusion import ConditionedDiffusionModelWrapper
 from audiox.training.diffusion import DiffusionCondTrainingWrapper
-from audiox.training.finetune import apply_finetune_defaults
+from audiox.training.finetune import apply_finetune_defaults, maybe_apply_lora
 
 
 def _write_wav(path: Path, sample_rate: int, duration_seconds: float = 0.5) -> None:
@@ -75,6 +76,13 @@ class DummyConditioner(nn.Module):
             "text_prompt": (torch.zeros(batch, 4, 8, device=device), torch.ones(batch, 4, device=device)),
             "audio_prompt": (torch.zeros(batch, 3, 8, device=device), torch.ones(batch, 3, device=device)),
         }
+
+
+class TinyLoRAModule(nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.to_q = nn.Linear(8, 8, bias=False)
+        self.proj = nn.Linear(8, 8, bias=False)
 
 
 class IFCapsFineTuneTests(unittest.TestCase):
@@ -135,6 +143,30 @@ class IFCapsFineTuneTests(unittest.TestCase):
             256,
         )
 
+    def test_apply_finetune_defaults_caps_t5_length_for_mmdit_maf_budget(self):
+        model_config = {
+            "sample_rate": 44100,
+            "sample_size": 485100,
+            "model": {
+                "conditioning": {
+                    "configs": [
+                        {"id": "video_prompt", "type": "clip-with-sync-w-empty-feat", "config": {}},
+                        {"id": "text_prompt", "type": "t5", "config": {"t5_model_name": "t5-base", "max_length": 128}},
+                        {"id": "audio_prompt", "type": "audio_autoencoder_v2", "config": {}},
+                    ]
+                },
+                "diffusion": {
+                    "type": "mmdit",
+                    "cross_attention_cond_ids": ["video_prompt", "text_prompt", "audio_prompt"],
+                },
+            },
+        }
+        patched = apply_finetune_defaults(model_config, text_max_length=256)
+        self.assertEqual(
+            patched["model"]["conditioning"]["configs"][1]["config"]["max_length"],
+            128,
+        )
+
     def test_maf_branch_order_matches_video_text_audio(self):
         wrapper = ConditionedDiffusionModelWrapper(
             model=nn.Identity(),
@@ -159,6 +191,35 @@ class IFCapsFineTuneTests(unittest.TestCase):
         self.assertTrue(torch.all(text == 2.0))
         self.assertTrue(torch.all(audio == 3.0))
 
+    def test_inject_lora_wraps_target_modules_and_freezes_base_parameters(self):
+        module = TinyLoRAModule()
+        replaced = inject_lora(module, rank=4, alpha=8.0, target_patterns=("to_q",))
+        trainable, total = count_parameters(module)
+
+        self.assertEqual(replaced, ["to_q"])
+        self.assertIsInstance(module.to_q, LoRALinear)
+        self.assertIsInstance(module.proj, nn.Linear)
+        self.assertGreater(trainable, 0)
+        self.assertLess(trainable, total)
+        self.assertTrue(any(parameter.requires_grad for parameter in module.to_q.parameters()))
+        self.assertFalse(module.proj.weight.requires_grad)
+
+    def test_maybe_apply_lora_returns_replaced_module_names(self):
+        model = TinyLoRAModule()
+        lora_info = maybe_apply_lora(
+            model,
+            {
+                "lora": {
+                    "enabled": True,
+                    "rank": 2,
+                    "alpha": 4.0,
+                    "target_patterns": ["to_q"],
+                }
+            },
+        )
+        self.assertEqual(lora_info["replaced_modules"], ["to_q"])
+        self.assertGreater(lora_info["trainable_params"], 0)
+
     def test_dataset_emits_text_video_audio_and_padding_mask(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             tmpdir_path = Path(tmpdir)
@@ -181,7 +242,7 @@ class IFCapsFineTuneTests(unittest.TestCase):
 
             self.assertEqual(audio.shape, (2, 8000))
             self.assertIn("text_prompt", metadata)
-            self.assertEqual(metadata["video_prompt"]["video_tensors"].shape, (1, 1, 3, 224, 224))
+            self.assertEqual(metadata["video_prompt"]["video_tensors"].shape, (1, 20, 3, 224, 224))
             self.assertEqual(metadata["audio_prompt"].shape, (1, 2, 8000))
             self.assertEqual(metadata["padding_mask"].shape, (8000,))
             self.assertEqual(normalized["text_prompt"], "legacy")
