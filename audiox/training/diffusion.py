@@ -349,6 +349,8 @@ class DiffusionCondTrainingWrapper(pl.LightningModule):
         self.optimizer_configs = optimizer_configs
 
         self.pre_encoded = pre_encoded
+        self._skip_next_optimizer_step = False
+        self._last_nonfinite_grad_count = 0
 
     def configure_optimizers(self):
         diffusion_opt_config = self.optimizer_configs['diffusion']
@@ -367,6 +369,43 @@ class DiffusionCondTrainingWrapper(pl.LightningModule):
             return [opt_diff], [sched_diff_config]
 
         return [opt_diff]
+
+    def on_after_backward(self):
+        nonfinite_grad_count = 0
+        for parameter in self.diffusion.parameters():
+            if not parameter.requires_grad or parameter.grad is None:
+                continue
+            if not torch.isfinite(parameter.grad).all():
+                nonfinite_grad_count += 1
+
+        self._last_nonfinite_grad_count = nonfinite_grad_count
+        self._skip_next_optimizer_step = nonfinite_grad_count > 0
+
+        if self._skip_next_optimizer_step:
+            for parameter in self.diffusion.parameters():
+                if parameter.grad is not None:
+                    parameter.grad = None
+
+            self.log(
+                "train/nonfinite_grad_tensors",
+                float(nonfinite_grad_count),
+                on_step=True,
+                prog_bar=False,
+                logger=True,
+            )
+
+    def optimizer_step(self, epoch, batch_idx, optimizer, optimizer_closure=None):
+        if optimizer_closure is not None:
+            optimizer_closure()
+
+        if self._skip_next_optimizer_step:
+            optimizer.zero_grad(set_to_none=True)
+            self.log("train/skipped_nonfinite_step", 1.0, on_step=True, prog_bar=False, logger=True)
+            self._skip_next_optimizer_step = False
+            return
+
+        optimizer.step()
+        optimizer.zero_grad(set_to_none=True)
 
     def training_step(self, batch, batch_idx):
 
