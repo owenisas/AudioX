@@ -141,7 +141,7 @@ def read_video(filepath, seek_time=0., duration=-1, target_fps=2):
         image = Image.open(filepath).convert("RGB")
         frame = transforms.ToTensor()(image).unsqueeze(0)
         frame = resize_transform(frame)
-        target_frames = int(duration * target_fps)
+        target_frames = max(1, int(round(duration * target_fps)))
         frame = frame.repeat(int(math.ceil(target_frames / frame.shape[0])), 1, 1, 1)[:target_frames]
         assert frame.shape[0] == target_frames, f"The shape of frame is {frame.shape}"
         return frame
@@ -157,13 +157,17 @@ def read_video(filepath, seek_time=0., duration=-1, target_fps=2):
 
     seek_frame = int(seek_time * fps)
     if duration > 0:
-        total_frames_to_read = int(target_fps * duration)
+        total_frames_to_read = max(1, int(round(target_fps * duration)))
         frame_interval = int(math.ceil(fps / target_fps))
         end_frame = min(seek_frame + total_frames_to_read * frame_interval, total_frames)
         frame_ids = list(range(seek_frame, end_frame, frame_interval))
     else:
         frame_interval = int(math.ceil(fps / target_fps))
         frame_ids = list(range(0, total_frames, frame_interval))
+
+    if not frame_ids:
+        fallback_frame = min(max(seek_frame, 0), max(total_frames - 1, 0))
+        frame_ids = [fallback_frame]
 
     frames = vr.get_batch(frame_ids).asnumpy()
     frames = torch.from_numpy(frames).permute(0, 3, 1, 2)
