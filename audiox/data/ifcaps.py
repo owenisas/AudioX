@@ -627,7 +627,7 @@ class IFCapsFineTuneDataset(Dataset):
         waveform = self.stereo(waveform)
         chunk, _, _, seconds_start, seconds_total, padding_mask = self.pad_crop(waveform)
         clip_seconds = self.sample_size / self.sample_rate
-        video_seconds = self._resolve_video_duration(record)
+        video_seconds = self.video_duration_seconds
 
         variant = None
         if self.prompt_format == "mixed":
