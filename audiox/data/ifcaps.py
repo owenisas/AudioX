@@ -404,6 +404,20 @@ def _load_wav_with_wave(audio_path: Path) -> tp.Tuple[torch.Tensor, int]:
         raise ValueError(f"Unsupported WAV sample width: {sample_width}")
 
     waveform = torch.frombuffer(bytearray(raw), dtype=torch.int16).to(torch.float32)
+    if num_channels <= 0:
+        raise ValueError(f"Invalid WAV channel count: {num_channels}")
+    remainder = waveform.numel() % num_channels
+    if remainder:
+        valid_values = waveform.numel() - remainder
+        if valid_values <= 0:
+            raise ValueError(
+                f"WAV payload in {audio_path} does not contain a complete frame for {num_channels} channels"
+            )
+        warnings.warn(
+            f"Truncating {remainder} trailing PCM sample(s) from malformed WAV {audio_path}",
+            RuntimeWarning,
+        )
+        waveform = waveform[:valid_values]
     waveform = waveform.view(-1, num_channels).t().contiguous() / 32768.0
     return waveform, sample_rate
 

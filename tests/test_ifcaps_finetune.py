@@ -23,6 +23,7 @@ from audiox.data.mixed_preference import (
 )
 from audiox.data.ifcaps import (
     IFCapsFineTuneDataset,
+    _load_wav_with_wave,
     build_text_prompt,
     normalize_training_metadata,
     resolve_text_prompt_record,
@@ -173,6 +174,26 @@ class IFCapsFineTuneTests(unittest.TestCase):
         prompt = build_text_prompt(record, prompt_format="mixed", mixed_variant="xml_natural")
         self.assertIn("<audio>", prompt)
         self.assertIn("A distant bell rings.", prompt)
+
+    def test_load_wav_with_wave_truncates_incomplete_trailing_sample(self):
+        wav_path = Path("/tmp/malformed.wav")
+        mocked_wave = mock.MagicMock()
+        mocked_wave.getframerate.return_value = 16000
+        mocked_wave.getnchannels.return_value = 2
+        mocked_wave.getsampwidth.return_value = 2
+        mocked_wave.getnframes.return_value = 2
+        mocked_wave.readframes.return_value = torch.arange(5, dtype=torch.int16).numpy().tobytes()
+        mocked_wave.__enter__.return_value = mocked_wave
+        mocked_wave.__exit__.return_value = False
+
+        with mock.patch("audiox.data.ifcaps.wave.open", return_value=mocked_wave):
+            with self.assertWarnsRegex(RuntimeWarning, "Truncating 1 trailing PCM sample"):
+                waveform, sample_rate = _load_wav_with_wave(wav_path)
+
+        self.assertEqual(sample_rate, 16000)
+        self.assertEqual(tuple(waveform.shape), (2, 2))
+        self.assertTrue(torch.allclose(waveform[0], torch.tensor([0.0, 2.0 / 32768.0])))
+        self.assertTrue(torch.allclose(waveform[1], torch.tensor([1.0 / 32768.0, 3.0 / 32768.0])))
 
     def test_multi_conditioner_falls_back_to_legacy_prompt_key(self):
         recorder = RecorderConditioner()
