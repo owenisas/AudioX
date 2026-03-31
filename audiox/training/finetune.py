@@ -225,7 +225,7 @@ def apply_trainable_scope(
     if not scope:
         return None
 
-    if scope not in {"asmr_continuation_lora", "multimodal_continuation_lora"}:
+    if scope not in {"asmr_continuation_lora", "multimodal_continuation_lora", "maf_continuation_lora"}:
         raise ValueError(f"Unsupported training.trainable_scope: {scope}")
 
     for _, parameter in model.named_parameters():
@@ -242,20 +242,21 @@ def apply_trainable_scope(
         _unfreeze_module(model.maf_block)
         unfrozen_modules.append("maf_block")
 
-    conditioner_registry = getattr(getattr(model, "conditioner", None), "conditioners", {})
-    for conditioner_id in _active_conditioner_ids(model_config, run_config.get("data")):
-        conditioner = conditioner_registry[conditioner_id] if conditioner_id in conditioner_registry else None
-        if conditioner is None:
-            continue
+    if scope in {"asmr_continuation_lora", "multimodal_continuation_lora"}:
+        conditioner_registry = getattr(getattr(model, "conditioner", None), "conditioners", {})
+        for conditioner_id in _active_conditioner_ids(model_config, run_config.get("data")):
+            conditioner = conditioner_registry[conditioner_id] if conditioner_id in conditioner_registry else None
+            if conditioner is None:
+                continue
 
-        for child_name, child_module in conditioner.named_children():
-            if child_name.startswith("proj"):
-                _unfreeze_module(child_module)
-                unfrozen_modules.append(f"conditioner.{conditioner_id}.{child_name}")
+            for child_name, child_module in conditioner.named_children():
+                if child_name.startswith("proj"):
+                    _unfreeze_module(child_module)
+                    unfrozen_modules.append(f"conditioner.{conditioner_id}.{child_name}")
 
-        if hasattr(conditioner, "empty_audio_feat"):
-            conditioner.empty_audio_feat.requires_grad = True
-            unfrozen_modules.append(f"conditioner.{conditioner_id}.empty_audio_feat")
+            if hasattr(conditioner, "empty_audio_feat"):
+                conditioner.empty_audio_feat.requires_grad = True
+                unfrozen_modules.append(f"conditioner.{conditioner_id}.empty_audio_feat")
 
     trainable_params, total_params = count_parameters(model)
     all_trainable_parameter_names = [

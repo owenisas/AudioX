@@ -536,6 +536,45 @@ class IFCapsFineTuneTests(unittest.TestCase):
         self.assertTrue(model.maf_block[0].weight.requires_grad)
         self.assertTrue(model.conditioner.conditioners["video_prompt"].proj_out.weight.requires_grad)
 
+    def test_apply_trainable_scope_supports_maf_only_continuation_scope(self):
+        model = TinyScopeModel()
+        maybe_apply_lora(
+            model,
+            {
+                "lora": {
+                    "enabled": True,
+                    "rank": 2,
+                    "alpha": 4.0,
+                    "target_patterns": ["to_q"],
+                }
+            },
+        )
+        scope_info = apply_trainable_scope(
+            model,
+            {
+                "model": {
+                    "conditioning": {
+                        "configs": [
+                            {"id": "text_prompt", "type": "t5", "config": {}},
+                            {"id": "audio_prompt", "type": "audio_autoencoder_v2", "config": {}},
+                            {"id": "video_prompt", "type": "clip-with-sync-w-empty-feat", "config": {}},
+                        ]
+                    }
+                }
+            },
+            {
+                "training": {"trainable_scope": "maf_continuation_lora"},
+                "data": {"include_audio_conditioning": True, "include_video_conditioning": True},
+            },
+        )
+        self.assertEqual(scope_info["scope"], "maf_continuation_lora")
+        self.assertTrue(model.to_q.lora_a.weight.requires_grad)
+        self.assertTrue(model.maf_block[0].weight.requires_grad)
+        self.assertFalse(model.conditioner.conditioners["text_prompt"].proj_out.weight.requires_grad)
+        self.assertFalse(model.conditioner.conditioners["audio_prompt"].proj_features_128.weight.requires_grad)
+        self.assertFalse(model.conditioner.conditioners["audio_prompt"].empty_audio_feat.requires_grad)
+        self.assertFalse(model.conditioner.conditioners["video_prompt"].proj_out.weight.requires_grad)
+
     def test_create_trainer_skips_checkpoint_callback_when_disabled(self):
         trainer = create_trainer(
             trainer_config={"accelerator": "cpu", "devices": 1, "max_steps": 1},
