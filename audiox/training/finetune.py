@@ -380,6 +380,10 @@ def create_finetune_dataloaders(
     sample_size = model_config["sample_size"]
     sample_seconds = sample_size / sample_rate
     video_fps = model_config.get("video_fps", data_config.get("video_fps", 5))
+    video_duration_seconds = data_config.get(
+        "video_duration_seconds",
+        model_config.get("video_duration_seconds", 10.0),
+    )
     num_workers = data_config.get("num_workers", 0)
     audio_prompt_num_samples = extract_audio_prompt_num_samples(model_config, sample_size)
 
@@ -394,7 +398,7 @@ def create_finetune_dataloaders(
         "include_video_conditioning": data_config.get("include_video_conditioning", False),
         "include_audio_conditioning": data_config.get("include_audio_conditioning", False),
         "video_fps": video_fps,
-        "video_duration_seconds": data_config.get("video_duration_seconds", sample_seconds),
+        "video_duration_seconds": video_duration_seconds,
         "audio_prompt_num_samples": data_config.get("audio_prompt_num_samples", audio_prompt_num_samples),
         "synchformer_ckpt_path": artifact_paths.get("synchformer_ckpt_path"),
         "compute_video_sync_on_the_fly": data_config.get("compute_video_sync_on_the_fly", False),
