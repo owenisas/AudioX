@@ -21,11 +21,13 @@ def build_run_config(
     wandb_project: str,
     wandb_entity: str | None,
     wandb_offline: bool,
+    huggingface_repo_id: str | None,
+    huggingface_private: bool,
     include_video_conditioning: bool,
     standalone_ratio: float,
     continuation_ratio: float,
 ) -> dict:
-    return {
+    run_config = {
         "output_dir": output_dir,
         "cache_dir": cache_dir,
         "pretrained_name": pretrained_name,
@@ -102,6 +104,19 @@ def build_run_config(
             "log_model": False,
         },
     }
+    if huggingface_repo_id:
+        run_config["huggingface"] = {
+            "enabled": True,
+            "repo_id": huggingface_repo_id,
+            "repo_type": "model",
+            "private": huggingface_private,
+            "upload_final_checkpoint": True,
+            "upload_resolved_config": True,
+            "upload_run_config": True,
+            "upload_manifest_summary": True,
+            "upload_train_log": False,
+        }
+    return run_config
 
 
 def main() -> None:
@@ -167,6 +182,16 @@ def main() -> None:
     parser.add_argument("--wandb-entity", default=None, help="Optional Weights & Biases entity.")
     parser.add_argument("--wandb-offline", action="store_true", help="Enable offline W&B logging.")
     parser.add_argument(
+        "--hf-repo-id",
+        default=None,
+        help="Optional Hugging Face model repo to upload final artifacts to.",
+    )
+    parser.add_argument(
+        "--hf-public",
+        action="store_true",
+        help="Create/update the Hugging Face repo as public instead of private.",
+    )
+    parser.add_argument(
         "--run-name",
         default=None,
         help="Optional run name. Defaults to a mixed-preference prefix with the dataset stem.",
@@ -204,6 +229,8 @@ def main() -> None:
         wandb_project=args.wandb_project,
         wandb_entity=args.wandb_entity,
         wandb_offline=args.wandb_offline,
+        huggingface_repo_id=args.hf_repo_id,
+        huggingface_private=not args.hf_public,
         include_video_conditioning=not args.disable_video_conditioning,
         standalone_ratio=args.standalone_ratio,
         continuation_ratio=args.continuation_ratio,

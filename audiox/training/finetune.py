@@ -5,7 +5,7 @@ import typing as tp
 from pathlib import Path
 
 import pytorch_lightning as pl
-from huggingface_hub import hf_hub_download
+from huggingface_hub import HfApi, hf_hub_download
 from pytorch_lightning.callbacks import LearningRateMonitor, ModelCheckpoint
 from pytorch_lightning.loggers import CSVLogger, WandbLogger
 import torch
@@ -545,6 +545,124 @@ def create_trainer(
     return pl.Trainer(**trainer_kwargs)
 
 
+def _resolve_hf_token(upload_config: tp.Dict[str, tp.Any]) -> tp.Optional[str]:
+    explicit_token = upload_config.get("token")
+    if explicit_token:
+        return explicit_token
+
+    for env_key in ("HF_TOKEN", "HUGGINGFACE_HUB_TOKEN", "HF_API_TOKEN"):
+        env_value = os.getenv(env_key)
+        if env_value:
+            return env_value
+    return None
+
+
+def _join_repo_path(prefix: str, filename: str) -> str:
+    parts = [part.strip("/") for part in (prefix, filename) if part]
+    return "/".join(parts)
+
+
+def maybe_upload_huggingface_artifacts(
+    run_config: tp.Dict[str, tp.Any],
+    *,
+    source_config_path: tp.Union[str, Path],
+    resolved_model_config_path: tp.Union[str, Path],
+    final_checkpoint_path: tp.Optional[tp.Union[str, Path]],
+) -> tp.Optional[tp.Dict[str, tp.Any]]:
+    upload_config = run_config.get("huggingface") or run_config.get("hf_upload") or {}
+    if not upload_config.get("enabled", False):
+        return None
+
+    repo_id = upload_config.get("repo_id")
+    if not repo_id:
+        raise ValueError("huggingface.repo_id must be provided when Hugging Face upload is enabled.")
+
+    repo_type = upload_config.get("repo_type", "model")
+    private = upload_config.get("private", True)
+    token = _resolve_hf_token(upload_config)
+    path_prefix = upload_config.get("path_prefix", "").strip("/")
+    commit_message = upload_config.get("commit_message", "Upload AudioX fine-tune artifacts")
+    api = HfApi(token=token)
+    api.create_repo(repo_id=repo_id, repo_type=repo_type, private=private, exist_ok=True)
+
+    uploaded_files: tp.List[tp.Dict[str, str]] = []
+
+    def upload_if_exists(
+        local_path: tp.Optional[tp.Union[str, Path]],
+        *,
+        enabled: bool,
+        remote_name: tp.Optional[str] = None,
+        required: bool = False,
+    ) -> None:
+        if not enabled:
+            return
+        if local_path is None:
+            if required:
+                raise ValueError(
+                    f"Hugging Face upload expected an artifact for {remote_name or 'final checkpoint'}, "
+                    "but it was not produced."
+                )
+            return
+
+        resolved_path = Path(local_path)
+        if not resolved_path.exists():
+            if required:
+                raise FileNotFoundError(f"Hugging Face upload artifact is missing: {resolved_path}")
+            return
+
+        path_in_repo = _join_repo_path(path_prefix, remote_name or resolved_path.name)
+        api.upload_file(
+            path_or_fileobj=str(resolved_path),
+            path_in_repo=path_in_repo,
+            repo_id=repo_id,
+            repo_type=repo_type,
+            commit_message=commit_message,
+        )
+        uploaded_files.append(
+            {
+                "local_path": str(resolved_path),
+                "path_in_repo": path_in_repo,
+            }
+        )
+
+    source_config_path = Path(source_config_path)
+    manifest_summary_path = source_config_path.parent / "manifest_summary.json"
+
+    upload_if_exists(
+        final_checkpoint_path,
+        enabled=upload_config.get("upload_final_checkpoint", True),
+        remote_name=upload_config.get("final_checkpoint_path_in_repo"),
+        required=upload_config.get("upload_final_checkpoint", True),
+    )
+    upload_if_exists(
+        resolved_model_config_path,
+        enabled=upload_config.get("upload_resolved_config", True),
+        remote_name=upload_config.get("resolved_model_config_path_in_repo", "resolved_model_config.json"),
+    )
+    upload_if_exists(
+        source_config_path,
+        enabled=upload_config.get("upload_run_config", True),
+        remote_name=upload_config.get("run_config_path_in_repo", "run_config.json"),
+    )
+    upload_if_exists(
+        manifest_summary_path,
+        enabled=upload_config.get("upload_manifest_summary", True),
+        remote_name=upload_config.get("manifest_summary_path_in_repo", "manifest_summary.json"),
+    )
+    upload_if_exists(
+        upload_config.get("train_log_path"),
+        enabled=upload_config.get("upload_train_log", False),
+        remote_name=upload_config.get("train_log_path_in_repo"),
+    )
+
+    return {
+        "repo_id": repo_id,
+        "repo_type": repo_type,
+        "repo_url": f"https://huggingface.co/{repo_id}",
+        "uploaded_files": uploaded_files,
+    }
+
+
 def run_finetune(config_path: tp.Union[str, Path]) -> tp.Dict[str, tp.Any]:
     run_config = _load_json(config_path)
     output_dir = Path(run_config.get("output_dir", "./outputs/audiox_finetune")).resolve()
@@ -624,6 +742,13 @@ def run_finetune(config_path: tp.Union[str, Path]) -> tp.Dict[str, tp.Any]:
                 weights_only=checkpoint_config.get("save_weights_only", False),
             )
 
+    huggingface_upload_info = maybe_upload_huggingface_artifacts(
+        run_config,
+        source_config_path=config_path,
+        resolved_model_config_path=resolved_config_path,
+        final_checkpoint_path=final_checkpoint_path,
+    )
+
     return {
         "artifact_paths": artifact_paths,
         "model_config": model_config,
@@ -632,6 +757,7 @@ def run_finetune(config_path: tp.Union[str, Path]) -> tp.Dict[str, tp.Any]:
         "output_dir": str(output_dir),
         "resolved_model_config_path": str(resolved_config_path),
         "final_checkpoint_path": str(final_checkpoint_path) if final_checkpoint_path else None,
+        "huggingface_upload_info": huggingface_upload_info,
         "trainer": trainer,
         "training_wrapper": training_wrapper,
     }

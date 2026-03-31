@@ -46,6 +46,7 @@ from audiox.training.finetune import (
     apply_trainable_scope,
     build_sample_weights,
     create_trainer,
+    maybe_upload_huggingface_artifacts,
     maybe_apply_lora,
 )
 
@@ -544,6 +545,70 @@ class IFCapsFineTuneTests(unittest.TestCase):
         )
         checkpoint_callbacks = [callback for callback in trainer.callbacks if callback.__class__.__name__ == "ModelCheckpoint"]
         self.assertEqual(checkpoint_callbacks, [])
+
+    def test_maybe_upload_huggingface_artifacts_uploads_final_checkpoint_and_configs(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmpdir_path = Path(tmpdir)
+            source_config_path = tmpdir_path / "config_mixed_preference.json"
+            source_config_path.write_text(json.dumps({"output_dir": "unused"}))
+            resolved_model_config_path = tmpdir_path / "resolved_model_config.json"
+            resolved_model_config_path.write_text(json.dumps({"sample_rate": 44100}))
+            final_checkpoint_path = tmpdir_path / "final-lora-state.pt"
+            final_checkpoint_path.write_bytes(b"checkpoint")
+            manifest_summary_path = tmpdir_path / "manifest_summary.json"
+            manifest_summary_path.write_text(json.dumps({"train_rows": 10}))
+
+            api = mock.Mock()
+            with mock.patch("audiox.training.finetune.HfApi", return_value=api), mock.patch.dict(
+                "os.environ", {"HF_TOKEN": "test-token"}, clear=False
+            ):
+                upload_info = maybe_upload_huggingface_artifacts(
+                    {
+                        "huggingface": {
+                            "enabled": True,
+                            "repo_id": "owenisas/audiox-mixed-preference-lora-test",
+                            "repo_type": "model",
+                            "private": True,
+                            "path_prefix": "runs/test-run",
+                        }
+                    },
+                    source_config_path=source_config_path,
+                    resolved_model_config_path=resolved_model_config_path,
+                    final_checkpoint_path=final_checkpoint_path,
+                )
+
+        api.create_repo.assert_called_once_with(
+            repo_id="owenisas/audiox-mixed-preference-lora-test",
+            repo_type="model",
+            private=True,
+            exist_ok=True,
+        )
+        uploaded_paths = [call.kwargs["path_in_repo"] for call in api.upload_file.call_args_list]
+        self.assertEqual(
+            uploaded_paths,
+            [
+                "runs/test-run/final-lora-state.pt",
+                "runs/test-run/resolved_model_config.json",
+                "runs/test-run/run_config.json",
+                "runs/test-run/manifest_summary.json",
+            ],
+        )
+        self.assertEqual(upload_info["repo_url"], "https://huggingface.co/owenisas/audiox-mixed-preference-lora-test")
+
+    def test_maybe_upload_huggingface_artifacts_requires_repo_id_when_enabled(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmpdir_path = Path(tmpdir)
+            source_config_path = tmpdir_path / "config.json"
+            source_config_path.write_text("{}")
+            resolved_model_config_path = tmpdir_path / "resolved_model_config.json"
+            resolved_model_config_path.write_text("{}")
+            with self.assertRaisesRegex(ValueError, "repo_id"):
+                maybe_upload_huggingface_artifacts(
+                    {"huggingface": {"enabled": True}},
+                    source_config_path=source_config_path,
+                    resolved_model_config_path=resolved_model_config_path,
+                    final_checkpoint_path=None,
+                )
 
     def test_dataset_emits_text_video_audio_and_padding_mask(self):
         with tempfile.TemporaryDirectory() as tmpdir:

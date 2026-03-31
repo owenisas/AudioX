@@ -81,5 +81,16 @@
     "name": "mixed-preference-example",
     "offline": false,
     "log_model": false
+  },
+  "huggingface": {
+    "enabled": false,
+    "repo_id": "owenisas/audiox-mixed-preference-lora",
+    "repo_type": "model",
+    "private": true,
+    "upload_final_checkpoint": true,
+    "upload_resolved_config": true,
+    "upload_run_config": true,
+    "upload_manifest_summary": true,
+    "upload_train_log": false
   }
 }
