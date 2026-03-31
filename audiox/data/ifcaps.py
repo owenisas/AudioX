@@ -2,6 +2,7 @@ import json
 import math
 import random
 import typing as tp
+import warnings
 import wave
 from html import escape
 from pathlib import Path
@@ -602,12 +603,20 @@ class IFCapsFineTuneDataset(Dataset):
                 audio_prompt_samples = self.audio_prompt_num_samples
             audio_prompt_seconds = audio_prompt_samples / self.sample_rate
 
-        audio_tensor = load_and_process_audio(
-            str(audio_prompt_path),
-            self.sample_rate,
-            seconds_start,
-            audio_prompt_seconds,
-        )
+        try:
+            audio_tensor = load_and_process_audio(
+                str(audio_prompt_path),
+                self.sample_rate,
+                seconds_start,
+                audio_prompt_seconds,
+            )
+        except Exception as exc:
+            warnings.warn(
+                f"Failed to load audio conditioning from {audio_prompt_path}: {exc}. "
+                "Using zero audio conditioning instead.",
+                RuntimeWarning,
+            )
+            return torch.zeros(1, 2, self.audio_prompt_num_samples)
         if audio_tensor.shape[-1] > self.audio_prompt_num_samples:
             audio_tensor = audio_tensor[..., : self.audio_prompt_num_samples]
         elif audio_tensor.shape[-1] < self.audio_prompt_num_samples:

@@ -690,6 +690,41 @@ class IFCapsFineTuneTests(unittest.TestCase):
                 _, metadata = dataset[0]
             self.assertGreater(float(torch.abs(metadata["audio_prompt"]).sum()), 0.0)
 
+    def test_dataset_invalid_audio_prompt_falls_back_to_zero_conditioning(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmpdir_path = Path(tmpdir)
+            audio_path = tmpdir_path / "sample.wav"
+            prompt_path = tmpdir_path / "broken.wav"
+            _write_wav(audio_path, sample_rate=16000)
+            prompt_path.write_bytes(b"not-a-real-wav")
+            manifest_path = tmpdir_path / "train.jsonl"
+            manifest_path.write_text(
+                json.dumps(
+                    {
+                        "audio_path": str(audio_path),
+                        "audio_prompt_path": str(prompt_path),
+                        "caption": "Soft rain.",
+                    }
+                )
+                + "\n"
+            )
+
+            dataset = IFCapsFineTuneDataset(
+                manifest_path=manifest_path,
+                sample_rate=16000,
+                sample_size=8000,
+                prompt_format="natural",
+                include_video_conditioning=False,
+                include_audio_conditioning=True,
+                audio_prompt_num_samples=8000,
+            )
+            with mock.patch(
+                "audiox.data.ifcaps.load_and_process_audio",
+                side_effect=RuntimeError("decode failure"),
+            ):
+                _, metadata = dataset[0]
+            self.assertTrue(torch.all(metadata["audio_prompt"] == 0))
+
     def test_resolve_text_prompt_record_samples_from_candidate_pool(self):
         record = {
             "text_prompt": "primary",
