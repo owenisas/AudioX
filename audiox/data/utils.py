@@ -121,13 +121,16 @@ from PIL import Image
 
 def adjust_video_duration(video_tensor, duration, target_fps):
     current_duration = video_tensor.shape[0]
-    target_duration = duration * target_fps
+    target_duration = int(duration * target_fps)
     if current_duration > target_duration:
         video_tensor = video_tensor[:target_duration]
     elif current_duration < target_duration:
+        if current_duration == 0:
+            raise ValueError("Video tensor has no frames to pad from.")
         last_frame = video_tensor[-1:]
         repeat_times = target_duration - current_duration
-        video_tensor = torch.cat((video_tensor, last_frame.repeat(repeat_times, 1, 1, 1)), dim=0)
+        padded_frames = last_frame.expand(repeat_times, -1, -1, -1).clone()
+        video_tensor = torch.cat((video_tensor, padded_frames), dim=0)
     return video_tensor
 
 
@@ -170,7 +173,7 @@ def read_video(filepath, seek_time=0., duration=-1, target_fps=2):
         frames = resize_transform(frames)
 
     video_tensor = adjust_video_duration(frames, duration, target_fps)
-    assert video_tensor.shape[0] == duration * target_fps, f"The shape of video_tensor is {video_tensor.shape}"
+    assert video_tensor.shape[0] == int(duration * target_fps), f"The shape of video_tensor is {video_tensor.shape}"
 
     return video_tensor
 
