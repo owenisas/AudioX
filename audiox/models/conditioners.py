@@ -296,6 +296,17 @@ class CLIPConditioner(Conditioner):
         video_tensor = self.preprocess_CLIP(video_tensor)
         return video_tensor
 
+    def _match_temp_pos_embedding(self, time_length: int) -> torch.Tensor:
+        temp_pos_embedding = self.Temp_pos_embedding
+        current_length = temp_pos_embedding.shape[1]
+        if current_length == time_length:
+            return temp_pos_embedding
+        if current_length > time_length:
+            return temp_pos_embedding[:, :time_length, :]
+        pad_frames = time_length - current_length
+        pad = temp_pos_embedding[:, -1:, :].expand(1, pad_frames, -1)
+        return torch.cat((temp_pos_embedding, pad), dim=1)
+
     def init_first_from_ckpt(self, path):
         model = torch.load(path, map_location="cpu")
         if "state_dict" in list(model.keys()):
@@ -336,7 +347,7 @@ class CLIPConditioner(Conditioner):
             video_hidden = outputs.last_hidden_state
 
             video_hidden = einops.rearrange(video_hidden, '(b t) q h -> (b q) t h',b=batch_size,t=time_length)
-            video_hidden += self.Temp_pos_embedding
+            video_hidden += self._match_temp_pos_embedding(time_length)
             video_hidden = self.Temp_transformer(video_hidden)
             video_hidden = einops.rearrange(video_hidden, '(b q) t h -> b (t q) h',b=batch_size,t=time_length)
 
@@ -412,6 +423,17 @@ class CLIPWithSyncWithEmptyFeatureConditioner(Conditioner):
         video_tensor = self.preprocess_CLIP(video_tensor)
         return video_tensor
 
+    def _match_temp_pos_embedding(self, time_length: int) -> torch.Tensor:
+        temp_pos_embedding = self.Temp_pos_embedding
+        current_length = temp_pos_embedding.shape[1]
+        if current_length == time_length:
+            return temp_pos_embedding
+        if current_length > time_length:
+            return temp_pos_embedding[:, :time_length, :]
+        pad_frames = time_length - current_length
+        pad = temp_pos_embedding[:, -1:, :].expand(1, pad_frames, -1)
+        return torch.cat((temp_pos_embedding, pad), dim=1)
+
     def init_first_from_ckpt(self, path):
         model = torch.load(path, map_location="cpu")
         if "state_dict" in list(model.keys()):
@@ -459,7 +481,7 @@ class CLIPWithSyncWithEmptyFeatureConditioner(Conditioner):
             video_hidden = outputs.last_hidden_state
 
             video_hidden = einops.rearrange(video_hidden, '(b t) q h -> (b q) t h',b=batch_size,t=time_length)
-            video_hidden += self.Temp_pos_embedding
+            video_hidden += self._match_temp_pos_embedding(time_length)
             video_hidden = self.Temp_transformer(video_hidden)
             video_hidden = einops.rearrange(video_hidden, '(b q) t h -> b (t q) h',b=batch_size,t=time_length)
 
