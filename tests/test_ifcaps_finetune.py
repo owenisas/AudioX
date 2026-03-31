@@ -18,12 +18,14 @@ from audiox.data.asmr import (
 from audiox.data.mixed_preference import (
     DEFAULT_MIXED_PREFERENCE_SOURCE_FAMILIES,
     build_mixed_preference_manifest_rows,
+    collect_text_prompt_candidates,
     prepare_mixed_preference_manifests,
 )
 from audiox.data.ifcaps import (
     IFCapsFineTuneDataset,
     build_text_prompt,
     normalize_training_metadata,
+    resolve_text_prompt_record,
     select_prompt_variant,
     serialize_ifcaps_to_xml,
 )
@@ -623,6 +625,48 @@ class IFCapsFineTuneTests(unittest.TestCase):
                 _, metadata = dataset[0]
             self.assertGreater(float(torch.abs(metadata["audio_prompt"]).sum()), 0.0)
 
+    def test_resolve_text_prompt_record_samples_from_candidate_pool(self):
+        record = {
+            "text_prompt": "primary",
+            "text_prompt_candidates": ["primary", "alternate", "timeline"],
+        }
+        with mock.patch("audiox.data.ifcaps.torch.randint", return_value=torch.tensor([1])):
+            resolved = resolve_text_prompt_record(record, sample_text_prompt_candidates=True)
+        self.assertEqual(resolved["text_prompt"], "alternate")
+        self.assertEqual(
+            resolved["text_prompt_candidates"],
+            ["primary", "alternate", "timeline"],
+        )
+
+    def test_dataset_keeps_eval_caption_deterministic_when_sampling_disabled(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmpdir_path = Path(tmpdir)
+            audio_path = tmpdir_path / "sample.wav"
+            _write_wav(audio_path, sample_rate=16000)
+            manifest_path = tmpdir_path / "train.jsonl"
+            manifest_path.write_text(
+                json.dumps(
+                    {
+                        "audio_path": str(audio_path),
+                        "text_prompt": "primary prompt",
+                        "text_prompt_candidates": ["primary prompt", "alternate prompt"],
+                    }
+                )
+                + "\n"
+            )
+
+            dataset = IFCapsFineTuneDataset(
+                manifest_path=manifest_path,
+                sample_rate=16000,
+                sample_size=8000,
+                prompt_format="natural",
+                include_video_conditioning=False,
+                include_audio_conditioning=False,
+                sample_text_prompt_candidates=False,
+            )
+            _, metadata = dataset[0]
+            self.assertEqual(metadata["text_prompt"], "primary prompt")
+
     def test_build_mixed_preference_manifest_rows_rewrites_paths_and_ignores_gap_links(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             dataset_root = Path(tmpdir) / "dataset"
@@ -661,6 +705,12 @@ class IFCapsFineTuneTests(unittest.TestCase):
                     "video_path": str(video_dir / "clip_0001.mp4"),
                     "training_caption": "plain one",
                     "tagged_training_caption": "[asmr]: one",
+                    "tagged_alternate_captions": ["[asmr]: one alt", "[asmr]: one"],
+                    "alternate_captions": ["plain one alt"],
+                    "augmented_captions": [
+                        {"style": "timeline", "text": "timeline one"},
+                        {"style": "short", "text": "plain one alt"},
+                    ],
                     "preference_tags": ["asmr"],
                     "source_family": "asmr",
                     "start_s": 10.0,
@@ -698,6 +748,26 @@ class IFCapsFineTuneTests(unittest.TestCase):
             self.assertTrue(rows[0]["video_path"].startswith(str(media_root)))
             self.assertEqual(rows[-1]["text_prompt"], "plain four")
             self.assertNotIn("video_path", rows[-1])
+            self.assertEqual(
+                rows[1]["text_prompt_candidates"],
+                ["[asmr]: one", "plain one", "[asmr]: one alt", "plain one alt", "timeline one"],
+            )
+
+    def test_collect_text_prompt_candidates_prefers_requested_caption_and_deduplicates_alternates(self):
+        record = {
+            "training_caption": "plain base",
+            "tagged_training_caption": "[asmr]: base",
+            "tagged_alternate_captions": ["[asmr]: alt one", "[asmr]: base"],
+            "alternate_captions": ["plain alt one", "plain base"],
+            "augmented_captions": [
+                {"style": "timeline", "text": "timeline caption"},
+                {"style": "short", "text": "plain alt one"},
+            ],
+        }
+        self.assertEqual(
+            collect_text_prompt_candidates(record, "tagged_training_caption"),
+            ["[asmr]: base", "plain base", "[asmr]: alt one", "plain alt one", "timeline caption"],
+        )
 
     def test_prepare_mixed_preference_manifests_preserves_dataset_splits(self):
         with tempfile.TemporaryDirectory() as tmpdir:

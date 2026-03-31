@@ -115,11 +115,60 @@ def _rewrite_media_path(
 
 
 def _resolve_text_prompt(record: tp.Dict[str, tp.Any], caption_field: str) -> str:
-    return _first_nonempty(
+    candidates = collect_text_prompt_candidates(record, caption_field)
+    return candidates[0] if candidates else ""
+
+
+def _normalize_prompt_key(value: tp.Any) -> str:
+    return " ".join(str(value).strip().split())
+
+
+def _iter_prompt_values(value: tp.Any) -> tp.Iterable[str]:
+    if value is None:
+        return
+    if isinstance(value, str):
+        text = value.strip()
+        if text:
+            yield text
+        return
+    if isinstance(value, dict):
+        text = _first_nonempty(value.get("text"), value.get("caption"), value.get("prompt"))
+        if text:
+            yield text
+        return
+    if isinstance(value, (list, tuple)):
+        for item in value:
+            yield from _iter_prompt_values(item)
+        return
+
+    text = str(value).strip()
+    if text:
+        yield text
+
+
+def collect_text_prompt_candidates(record: tp.Dict[str, tp.Any], caption_field: str) -> tp.List[str]:
+    ordered_values = [
         record.get(caption_field),
+        record.get("text_prompt"),
         record.get("tagged_training_caption"),
         record.get("training_caption"),
-    )
+        record.get("tagged_caption"),
+        record.get("caption"),
+        record.get("tagged_alternate_captions"),
+        record.get("alternate_captions"),
+        record.get("augmented_captions"),
+    ]
+
+    candidates: tp.List[str] = []
+    seen: tp.Set[str] = set()
+    for value in ordered_values:
+        for prompt in _iter_prompt_values(value):
+            key = _normalize_prompt_key(prompt)
+            if not key or key in seen:
+                continue
+            seen.add(key)
+            candidates.append(prompt.strip())
+    return candidates
 
 
 def _resolve_clip_duration(record: tp.Dict[str, tp.Any], default_seconds: float = 10.0) -> float:
@@ -180,7 +229,8 @@ def build_mixed_preference_manifest_rows(
             if audio_source_path is None or not audio_source_path.exists():
                 raise ValueError(f"Missing audio target for clip {row.get('clip_id')}: {row.get('audio_path')}")
 
-            text_prompt = _resolve_text_prompt(row, caption_field)
+            text_prompt_candidates = collect_text_prompt_candidates(row, caption_field)
+            text_prompt = text_prompt_candidates[0] if text_prompt_candidates else ""
             if not text_prompt:
                 raise ValueError(f"Missing caption field '{caption_field}' and fallback training caption for clip {row.get('clip_id')}")
 
@@ -198,6 +248,7 @@ def build_mixed_preference_manifest_rows(
                     media_root=media_root_path,
                 ),
                 "text_prompt": text_prompt,
+                "text_prompt_candidates": text_prompt_candidates,
                 "sample_type": "standalone",
                 "sequence_id": sequence_id,
                 "chunk_index": clip_index,

@@ -340,6 +340,45 @@ def normalize_training_metadata(metadata: tp.Dict[str, tp.Any]) -> tp.Dict[str, 
     return normalized
 
 
+def _coerce_text_prompt_candidates(value: tp.Any) -> tp.List[str]:
+    if value is None:
+        return []
+    if isinstance(value, str):
+        text = value.strip()
+        return [text] if text else []
+    if isinstance(value, (list, tuple)):
+        candidates: tp.List[str] = []
+        for item in value:
+            if isinstance(item, str):
+                text = item.strip()
+            else:
+                text = str(item).strip()
+            if text:
+                candidates.append(text)
+        return candidates
+    text = str(value).strip()
+    return [text] if text else []
+
+
+def resolve_text_prompt_record(
+    record: tp.Dict[str, tp.Any],
+    *,
+    sample_text_prompt_candidates: bool = False,
+) -> tp.Dict[str, tp.Any]:
+    resolved = dict(record)
+    candidates = _coerce_text_prompt_candidates(resolved.get("text_prompt_candidates"))
+    if not candidates:
+        return resolved
+
+    if sample_text_prompt_candidates and len(candidates) > 1:
+        candidate_index = int(torch.randint(len(candidates), (1,)).item())
+        resolved["text_prompt"] = candidates[candidate_index]
+    else:
+        resolved["text_prompt"] = candidates[0]
+    resolved["text_prompt_candidates"] = candidates
+    return resolved
+
+
 def _resample_audio(audio: torch.Tensor, source_sr: int, target_sr: int) -> torch.Tensor:
     if source_sr == target_sr:
         return audio
@@ -401,6 +440,7 @@ class IFCapsFineTuneDataset(Dataset):
         audio_prompt_num_samples: tp.Optional[int] = None,
         random_crop: bool = True,
         seed: int = 0,
+        sample_text_prompt_candidates: bool = False,
         synchformer_ckpt_path: tp.Optional[tp.Union[str, Path]] = None,
         compute_video_sync_on_the_fly: bool = False,
     ):
@@ -419,6 +459,7 @@ class IFCapsFineTuneDataset(Dataset):
         self.video_duration_seconds = video_duration_seconds
         self.audio_prompt_num_samples = audio_prompt_num_samples or sample_size
         self.seed = seed
+        self.sample_text_prompt_candidates = sample_text_prompt_candidates
         self.synchformer_ckpt_path = str(synchformer_ckpt_path) if synchformer_ckpt_path else None
         self.compute_video_sync_on_the_fly = compute_video_sync_on_the_fly
 
@@ -571,7 +612,10 @@ class IFCapsFineTuneDataset(Dataset):
         return audio_tensor.unsqueeze(0)
 
     def __getitem__(self, index: int) -> tp.Tuple[torch.Tensor, tp.Dict[str, tp.Any]]:
-        record = dict(self.records[index])
+        record = resolve_text_prompt_record(
+            self.records[index],
+            sample_text_prompt_candidates=self.sample_text_prompt_candidates,
+        )
         audio_path = self._resolve_path(record.get("audio_path") or record.get("path"))
         if audio_path is None:
             raise ValueError(f"Record {index} is missing audio_path/path")

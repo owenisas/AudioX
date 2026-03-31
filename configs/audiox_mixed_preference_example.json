@@ -18,7 +18,9 @@
     "compute_video_sync_on_the_fly": false,
     "sample_strategy": "weighted",
     "standalone_ratio": 0.3,
-    "continuation_ratio": 0.7
+    "continuation_ratio": 0.7,
+    "sample_text_prompt_candidates": true,
+    "sample_text_prompt_candidates_for_eval": false
   },
   "evaluation": {
     "test_manifest": "./data/mixed_preference_test.jsonl"

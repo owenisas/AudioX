@@ -404,6 +404,7 @@ def create_finetune_dataloaders(
         manifest_path=data_config["train_manifest"],
         random_crop=data_config.get("random_crop", True),
         seed=data_config.get("seed", 0),
+        sample_text_prompt_candidates=data_config.get("sample_text_prompt_candidates", True),
         **shared_dataset_kwargs,
     )
     sample_weights = build_sample_weights(
@@ -435,6 +436,7 @@ def create_finetune_dataloaders(
         manifest_path=val_manifest,
         random_crop=False,
         seed=data_config.get("seed", 0) + 100000,
+        sample_text_prompt_candidates=data_config.get("sample_text_prompt_candidates_for_eval", False),
         **shared_dataset_kwargs,
     )
     val_loader = DataLoader(

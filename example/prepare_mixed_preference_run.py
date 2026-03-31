@@ -47,6 +47,8 @@ def build_run_config(
             "sample_strategy": "weighted",
             "standalone_ratio": standalone_ratio,
             "continuation_ratio": continuation_ratio,
+            "sample_text_prompt_candidates": True,
+            "sample_text_prompt_candidates_for_eval": False,
         },
         "evaluation": {
             "test_manifest": test_manifest,
