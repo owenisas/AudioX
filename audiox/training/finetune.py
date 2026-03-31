@@ -225,7 +225,7 @@ def apply_trainable_scope(
     if not scope:
         return None
 
-    if scope != "asmr_continuation_lora":
+    if scope not in {"asmr_continuation_lora", "multimodal_continuation_lora"}:
         raise ValueError(f"Unsupported training.trainable_scope: {scope}")
 
     for _, parameter in model.named_parameters():

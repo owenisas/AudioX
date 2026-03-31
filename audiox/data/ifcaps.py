@@ -531,9 +531,23 @@ class IFCapsFineTuneDataset(Dataset):
         if not self.include_audio_conditioning:
             return torch.zeros(1, 2, self.audio_prompt_num_samples)
 
-        audio_prompt_path = self._resolve_path(
-            record.get("audio_prompt_path") or record.get("audio_conditioning_path") or record.get("audio_path")
-        )
+        explicit_audio_prompt_key = None
+        explicit_audio_prompt_value = None
+        for candidate_key in ("audio_prompt_path", "audio_conditioning_path"):
+            if candidate_key in record:
+                explicit_audio_prompt_key = candidate_key
+                explicit_audio_prompt_value = record.get(candidate_key)
+                break
+
+        if explicit_audio_prompt_key is not None:
+            if explicit_audio_prompt_value is None:
+                return torch.zeros(1, 2, self.audio_prompt_num_samples)
+            if isinstance(explicit_audio_prompt_value, str) and not explicit_audio_prompt_value.strip():
+                return torch.zeros(1, 2, self.audio_prompt_num_samples)
+            audio_prompt_path = self._resolve_path(explicit_audio_prompt_value)
+        else:
+            audio_prompt_path = self._resolve_path(record.get("audio_path"))
+
         if audio_prompt_path is None:
             return torch.zeros(1, 2, self.audio_prompt_num_samples)
 

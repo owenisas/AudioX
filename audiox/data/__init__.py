@@ -18,6 +18,12 @@ from .ifcaps import (
     select_prompt_variant,
     serialize_ifcaps_to_xml,
 )
+from .mixed_preference import (
+    DEFAULT_MIXED_PREFERENCE_SOURCE_FAMILIES,
+    build_mixed_preference_manifest_rows,
+    prepare_mixed_preference_manifests,
+    split_rows_by_split,
+)
 
 __all__ = [
     "ASMR_SAMPLE_RATE",
@@ -36,4 +42,8 @@ __all__ = [
     "normalize_training_metadata",
     "select_prompt_variant",
     "serialize_ifcaps_to_xml",
+    "DEFAULT_MIXED_PREFERENCE_SOURCE_FAMILIES",
+    "build_mixed_preference_manifest_rows",
+    "prepare_mixed_preference_manifests",
+    "split_rows_by_split",
 ]

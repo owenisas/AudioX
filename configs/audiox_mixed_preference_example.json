@@ -1,0 +1,83 @@
+{
+  "pretrained_name": "HKUSTAudio/AudioX-MAF-MMDiT",
+  "output_dir": "./outputs/audiox_mixed_preference",
+  "data": {
+    "train_manifest": "./data/mixed_preference_train.jsonl",
+    "val_manifest": "./data/mixed_preference_val.jsonl",
+    "batch_size": 1,
+    "eval_batch_size": 1,
+    "num_workers": 2,
+    "pin_memory": true,
+    "persistent_workers": false,
+    "drop_last": false,
+    "random_crop": false,
+    "seed": 0,
+    "prompt_format": "natural",
+    "include_video_conditioning": true,
+    "include_audio_conditioning": true,
+    "compute_video_sync_on_the_fly": false,
+    "sample_strategy": "weighted",
+    "standalone_ratio": 0.3,
+    "continuation_ratio": 0.7
+  },
+  "evaluation": {
+    "test_manifest": "./data/mixed_preference_test.jsonl"
+  },
+  "training": {
+    "text_max_length": 256,
+    "learning_rate": 1e-05,
+    "use_ema": false,
+    "mask_padding": true,
+    "cfg_dropout_prob": 0.1,
+    "timestep_sampler": "uniform",
+    "log_loss_info": false,
+    "trainable_scope": "multimodal_continuation_lora"
+  },
+  "trainer": {
+    "accelerator": "gpu",
+    "devices": 1,
+    "precision": "16-mixed",
+    "max_epochs": 1,
+    "max_steps": 3000,
+    "accumulate_grad_batches": 1,
+    "gradient_clip_val": 1.0,
+    "log_every_n_steps": 10,
+    "num_sanity_val_steps": 0
+  },
+  "checkpointing": {
+    "dirpath": "./outputs/audiox_mixed_preference/checkpoints",
+    "filename": "step={step}",
+    "enabled": true,
+    "save_last": true,
+    "save_top_k": -1,
+    "every_n_train_steps": 500,
+    "save_final_checkpoint": true,
+    "save_lora_only": true,
+    "final_checkpoint_name": "final-lora-state.pt"
+  },
+  "lora": {
+    "enabled": true,
+    "rank": 8,
+    "alpha": 16.0,
+    "dropout": 0.0,
+    "freeze_non_lora": true,
+    "target_patterns": [
+      "to_q",
+      "to_kv",
+      "to_qkv",
+      "to_out",
+      ".qkv",
+      "proj_mm_tokens",
+      "proj_mm_seq_len",
+      "gating_network.0",
+      "gating_network.2"
+    ]
+  },
+  "wandb": {
+    "enabled": true,
+    "project": "audiox-finetune",
+    "name": "mixed-preference-example",
+    "offline": false,
+    "log_model": false
+  }
+}

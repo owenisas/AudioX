@@ -5,6 +5,7 @@ import types
 import unittest
 import wave
 from pathlib import Path
+from unittest import mock
 
 import torch
 from torch import nn
@@ -13,6 +14,11 @@ from audiox.data.asmr import (
     ASMR_SECONDS_TOTAL,
     build_asmr_manifest_rows,
     split_manifest_rows_by_sequence,
+)
+from audiox.data.mixed_preference import (
+    DEFAULT_MIXED_PREFERENCE_SOURCE_FAMILIES,
+    build_mixed_preference_manifest_rows,
+    prepare_mixed_preference_manifests,
 )
 from audiox.data.ifcaps import (
     IFCapsFineTuneDataset,
@@ -492,6 +498,41 @@ class IFCapsFineTuneTests(unittest.TestCase):
         self.assertFalse(model.conditioner.conditioners["audio_prompt"].encoder.weight.requires_grad)
         self.assertFalse(model.conditioner.conditioners["video_prompt"].proj_out.weight.requires_grad)
 
+    def test_apply_trainable_scope_supports_multimodal_alias(self):
+        model = TinyScopeModel()
+        maybe_apply_lora(
+            model,
+            {
+                "lora": {
+                    "enabled": True,
+                    "rank": 2,
+                    "alpha": 4.0,
+                    "target_patterns": ["to_q"],
+                }
+            },
+        )
+        scope_info = apply_trainable_scope(
+            model,
+            {
+                "model": {
+                    "conditioning": {
+                        "configs": [
+                            {"id": "text_prompt", "type": "t5", "config": {}},
+                            {"id": "audio_prompt", "type": "audio_autoencoder_v2", "config": {}},
+                            {"id": "video_prompt", "type": "clip-with-sync-w-empty-feat", "config": {}},
+                        ]
+                    }
+                }
+            },
+            {
+                "training": {"trainable_scope": "multimodal_continuation_lora"},
+                "data": {"include_audio_conditioning": True, "include_video_conditioning": True},
+            },
+        )
+        self.assertEqual(scope_info["scope"], "multimodal_continuation_lora")
+        self.assertTrue(model.maf_block[0].weight.requires_grad)
+        self.assertTrue(model.conditioner.conditioners["video_prompt"].proj_out.weight.requires_grad)
+
     def test_create_trainer_skips_checkpoint_callback_when_disabled(self):
         trainer = create_trainer(
             trainer_config={"accelerator": "cpu", "devices": 1, "max_steps": 1},
@@ -528,6 +569,286 @@ class IFCapsFineTuneTests(unittest.TestCase):
             self.assertEqual(metadata["audio_prompt"].shape, (1, 2, 8000))
             self.assertEqual(metadata["padding_mask"].shape, (8000,))
             self.assertEqual(normalized["text_prompt"], "legacy")
+
+    def test_dataset_explicit_null_audio_prompt_uses_zero_conditioning(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmpdir_path = Path(tmpdir)
+            audio_path = tmpdir_path / "sample.wav"
+            _write_wav(audio_path, sample_rate=16000)
+            manifest_path = tmpdir_path / "train.jsonl"
+            manifest_path.write_text(
+                json.dumps(
+                    {
+                        "audio_path": str(audio_path),
+                        "caption": "Soft rain.",
+                        "audio_prompt_path": None,
+                    }
+                )
+                + "\n"
+            )
+
+            dataset = IFCapsFineTuneDataset(
+                manifest_path=manifest_path,
+                sample_rate=16000,
+                sample_size=8000,
+                prompt_format="natural",
+                include_video_conditioning=False,
+                include_audio_conditioning=True,
+                audio_prompt_num_samples=8000,
+            )
+            _, metadata = dataset[0]
+            self.assertTrue(torch.all(metadata["audio_prompt"] == 0))
+
+    def test_dataset_absent_audio_prompt_falls_back_to_audio_path(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmpdir_path = Path(tmpdir)
+            audio_path = tmpdir_path / "sample.wav"
+            _write_wav(audio_path, sample_rate=16000)
+            manifest_path = tmpdir_path / "train.jsonl"
+            manifest_path.write_text(json.dumps({"audio_path": str(audio_path), "caption": "Soft rain."}) + "\n")
+
+            dataset = IFCapsFineTuneDataset(
+                manifest_path=manifest_path,
+                sample_rate=16000,
+                sample_size=8000,
+                prompt_format="natural",
+                include_video_conditioning=False,
+                include_audio_conditioning=True,
+                audio_prompt_num_samples=8000,
+            )
+            with mock.patch(
+                "audiox.data.ifcaps.load_and_process_audio",
+                return_value=torch.ones(2, 8000),
+            ):
+                _, metadata = dataset[0]
+            self.assertGreater(float(torch.abs(metadata["audio_prompt"]).sum()), 0.0)
+
+    def test_build_mixed_preference_manifest_rows_rewrites_paths_and_ignores_gap_links(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            dataset_root = Path(tmpdir) / "dataset"
+            media_root = Path(tmpdir) / "remote"
+            audio_dir = dataset_root / "audio" / "audio_targets"
+            video_dir = dataset_root / "ifcaps" / "clips"
+            audio_dir.mkdir(parents=True)
+            video_dir.mkdir(parents=True)
+
+            _write_wav(audio_dir / "clip_0000.wav", sample_rate=16000)
+            _write_wav(audio_dir / "clip_0001.wav", sample_rate=16000)
+            _write_wav(audio_dir / "clip_0004.wav", sample_rate=16000)
+            (video_dir / "clip_0000.mp4").touch()
+            (video_dir / "clip_0001.mp4").touch()
+
+            records = [
+                {
+                    "clip_id": "clip_0000",
+                    "clip_index": 0,
+                    "sample_group_id": "group-a",
+                    "audio_path": str(audio_dir / "clip_0000.wav"),
+                    "video_path": str(video_dir / "clip_0000.mp4"),
+                    "training_caption": "plain zero",
+                    "tagged_training_caption": "[asmr]: zero",
+                    "preference_tags": ["asmr"],
+                    "source_family": "asmr",
+                    "start_s": 0.0,
+                    "end_s": 10.0,
+                    "split": "train",
+                },
+                {
+                    "clip_id": "clip_0001",
+                    "clip_index": 1,
+                    "sample_group_id": "group-a",
+                    "audio_path": str(audio_dir / "clip_0001.wav"),
+                    "video_path": str(video_dir / "clip_0001.mp4"),
+                    "training_caption": "plain one",
+                    "tagged_training_caption": "[asmr]: one",
+                    "preference_tags": ["asmr"],
+                    "source_family": "asmr",
+                    "start_s": 10.0,
+                    "end_s": 20.0,
+                    "prev_clip_id": "clip_0000",
+                    "split": "train",
+                },
+                {
+                    "clip_id": "clip_0004",
+                    "clip_index": 4,
+                    "sample_group_id": "group-a",
+                    "audio_path": str(audio_dir / "clip_0004.wav"),
+                    "training_caption": "plain four",
+                    "preference_tags": ["asmr"],
+                    "source_family": "asmr",
+                    "start_s": 40.0,
+                    "end_s": 50.0,
+                    "prev_clip_id": "clip_0001",
+                    "split": "val",
+                },
+            ]
+
+            rows = build_mixed_preference_manifest_rows(
+                records,
+                dataset_root=dataset_root,
+                media_root=media_root,
+                caption_field="tagged_training_caption",
+                source_families=DEFAULT_MIXED_PREFERENCE_SOURCE_FAMILIES,
+            )
+
+            self.assertEqual(len(rows), 4)
+            self.assertEqual(sum(1 for row in rows if row["sample_type"] == "continuation"), 1)
+            self.assertEqual(rows[0]["text_prompt"], "[asmr]: zero")
+            self.assertTrue(rows[0]["audio_path"].startswith(str(media_root)))
+            self.assertTrue(rows[0]["video_path"].startswith(str(media_root)))
+            self.assertEqual(rows[-1]["text_prompt"], "plain four")
+            self.assertNotIn("video_path", rows[-1])
+
+    def test_prepare_mixed_preference_manifests_preserves_dataset_splits(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            dataset_root = Path(tmpdir) / "dataset"
+            audio_dir = dataset_root / "audio" / "audio_targets"
+            manifest_dir = dataset_root / "audio"
+            video_dir = dataset_root / "ifcaps" / "clips"
+            audio_dir.mkdir(parents=True)
+            manifest_dir.mkdir(parents=True, exist_ok=True)
+            video_dir.mkdir(parents=True)
+
+            for name in ("train_0000", "train_0001", "val_0000", "test_0000"):
+                _write_wav(audio_dir / f"{name}.wav", sample_rate=16000)
+
+            records = [
+                {
+                    "clip_id": "train_0000",
+                    "clip_index": 0,
+                    "sample_group_id": "group-train",
+                    "audio_path": str(audio_dir / "train_0000.wav"),
+                    "tagged_training_caption": "[asmr]: train zero",
+                    "source_family": "asmr",
+                    "preference_tags": ["asmr"],
+                    "start_s": 0.0,
+                    "end_s": 10.0,
+                    "split": "train",
+                },
+                {
+                    "clip_id": "train_0001",
+                    "clip_index": 1,
+                    "sample_group_id": "group-train",
+                    "audio_path": str(audio_dir / "train_0001.wav"),
+                    "tagged_training_caption": "[asmr]: train one",
+                    "source_family": "asmr",
+                    "preference_tags": ["asmr"],
+                    "start_s": 10.0,
+                    "end_s": 20.0,
+                    "split": "train",
+                },
+                {
+                    "clip_id": "val_0000",
+                    "clip_index": 0,
+                    "sample_group_id": "group-val",
+                    "audio_path": str(audio_dir / "val_0000.wav"),
+                    "tagged_training_caption": "[ambience]: val zero",
+                    "source_family": "ambience",
+                    "preference_tags": ["ambience"],
+                    "start_s": 0.0,
+                    "end_s": 10.0,
+                    "split": "val",
+                },
+                {
+                    "clip_id": "test_0000",
+                    "clip_index": 0,
+                    "sample_group_id": "group-test",
+                    "audio_path": str(audio_dir / "test_0000.wav"),
+                    "tagged_training_caption": "[music]: test zero",
+                    "source_family": "music",
+                    "preference_tags": ["music"],
+                    "start_s": 0.0,
+                    "end_s": 10.0,
+                    "split": "test",
+                },
+            ]
+            manifest_path = manifest_dir / "audio_manifest_split.jsonl"
+            with manifest_path.open("w") as handle:
+                for record in records:
+                    handle.write(json.dumps(record) + "\n")
+
+            output_dir = Path(tmpdir) / "prepared"
+            summary = prepare_mixed_preference_manifests(dataset_root, output_dir)
+
+            self.assertEqual(summary["split_counts"]["train"], 3)
+            self.assertEqual(summary["split_counts"]["val"], 1)
+            self.assertEqual(summary["split_counts"]["test"], 1)
+            self.assertEqual(summary["sample_type_counts"]["continuation"], 1)
+            self.assertTrue(Path(summary["train_manifest_path"]).exists())
+            self.assertTrue(Path(summary["val_manifest_path"]).exists())
+            self.assertTrue(Path(summary["test_manifest_path"]).exists())
+
+    def test_mixed_preference_manifest_smoke_dataset_shapes_with_video_enabled(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            dataset_root = Path(tmpdir) / "dataset"
+            audio_dir = dataset_root / "audio" / "audio_targets"
+            manifest_dir = dataset_root / "audio"
+            audio_dir.mkdir(parents=True)
+            manifest_dir.mkdir(parents=True, exist_ok=True)
+
+            _write_wav(audio_dir / "clip_0000.wav", sample_rate=16000)
+            _write_wav(audio_dir / "clip_0001.wav", sample_rate=16000)
+
+            records = [
+                {
+                    "clip_id": "clip_0000",
+                    "clip_index": 0,
+                    "sample_group_id": "group-a",
+                    "audio_path": str(audio_dir / "clip_0000.wav"),
+                    "tagged_training_caption": "[asmr]: clip zero",
+                    "source_family": "asmr",
+                    "preference_tags": ["asmr"],
+                    "start_s": 0.0,
+                    "end_s": 1.0,
+                    "split": "train",
+                },
+                {
+                    "clip_id": "clip_0001",
+                    "clip_index": 1,
+                    "sample_group_id": "group-a",
+                    "audio_path": str(audio_dir / "clip_0001.wav"),
+                    "tagged_training_caption": "[asmr]: clip one",
+                    "source_family": "asmr",
+                    "preference_tags": ["asmr"],
+                    "start_s": 1.0,
+                    "end_s": 2.0,
+                    "split": "train",
+                },
+            ]
+            manifest_path = manifest_dir / "audio_manifest_split.jsonl"
+            with manifest_path.open("w") as handle:
+                for record in records:
+                    handle.write(json.dumps(record) + "\n")
+
+            output_dir = Path(tmpdir) / "prepared"
+            summary = prepare_mixed_preference_manifests(dataset_root, output_dir, include_video=True)
+            train_manifest = Path(summary["train_manifest_path"])
+            with train_manifest.open() as handle:
+                train_rows = [json.loads(line) for line in handle]
+            continuation_row = next(row for row in train_rows if row["sample_type"] == "continuation")
+
+            prepared_manifest = Path(tmpdir) / "prepared_manifest.jsonl"
+            prepared_manifest.write_text(json.dumps(continuation_row) + "\n")
+            dataset = IFCapsFineTuneDataset(
+                manifest_path=prepared_manifest,
+                sample_rate=16000,
+                sample_size=8000,
+                prompt_format="natural",
+                include_video_conditioning=True,
+                include_audio_conditioning=True,
+                audio_prompt_num_samples=8000,
+                video_fps=2,
+                video_duration_seconds=1.0,
+            )
+            with mock.patch(
+                "audiox.data.ifcaps.load_and_process_audio",
+                return_value=torch.ones(2, 8000),
+            ):
+                audio, metadata = dataset[0]
+            self.assertEqual(audio.shape, (2, 8000))
+            self.assertEqual(metadata["text_prompt"], "[asmr]: clip one")
+            self.assertEqual(metadata["video_prompt"]["video_tensors"].shape, (1, 2, 3, 224, 224))
+            self.assertGreater(float(torch.abs(metadata["audio_prompt"]).sum()), 0.0)
 
     def test_build_continuation_conditioning_uses_zero_audio_for_first_chunk(self):
         conditioning = build_continuation_conditioning(
