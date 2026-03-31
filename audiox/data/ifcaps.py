@@ -537,7 +537,10 @@ class IFCapsFineTuneDataset(Dataset):
             seek_time=seconds_start,
             duration=clip_seconds,
             target_fps=self.video_fps,
-        ).unsqueeze(0)
+        )
+        if video_tensor.shape[0] == 0:
+            return self._zero_video_prompt(clip_seconds)
+        video_tensor = video_tensor.unsqueeze(0)
 
         sync_path = self._resolve_path(record.get("video_sync_frames_path"))
         if sync_path is not None and sync_path.exists():

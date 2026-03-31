@@ -323,6 +323,9 @@ class CLIPConditioner(Conditioner):
         original_videos = torch.cat(Video_tensors, dim=0).to(device)
         batch_size, time_length, _, _, _ = original_videos.size()
         is_zero = torch.all(original_videos == 0, dim=(1,2,3,4))
+        if time_length == 0:
+            empty_visual_feat = self.empty_visual_feat.expand(batch_size, -1, -1)
+            return empty_visual_feat, torch.ones(batch_size, 1).to(device)
         Video_tensors = original_videos
         Video_tensors = einops.rearrange(Video_tensors, 'b t c h w -> (b t) c h w')
 
@@ -442,6 +445,9 @@ class CLIPWithSyncWithEmptyFeatureConditioner(Conditioner):
         original_videos = torch.cat(Video_tensors, dim=0).to(device)
         batch_size, time_length, _, _, _ = original_videos.size()
         is_zero = torch.all(original_videos == 0, dim=(1,2,3,4))
+        if time_length == 0:
+            empty_visual_feat = self.empty_visual_feat.expand(batch_size, -1, -1)
+            return empty_visual_feat, torch.ones(batch_size, 1).to(device)
         Video_tensors = original_videos        
 
         Video_tensors = einops.rearrange(Video_tensors, 'b t c h w -> (b t) c h w')
