@@ -2,6 +2,7 @@
 
 import torch
 import logging, warnings
+import contextlib
 import string
 import typing as tp
 import gc
@@ -544,7 +545,7 @@ class T5Conditioner(Conditioner):
             warnings.simplefilter("ignore")
             try:
                 self.tokenizer = AutoTokenizer.from_pretrained(t5_model_name)
-                model = T5EncoderModel.from_pretrained(t5_model_name).train(enable_grad).requires_grad_(enable_grad).to(torch.float16)
+                model = T5EncoderModel.from_pretrained(t5_model_name).train(enable_grad).requires_grad_(enable_grad)
             finally:
                 logging.disable(previous_level)
             
@@ -554,8 +555,10 @@ class T5Conditioner(Conditioner):
             self.__dict__["model"] = model
 
     def forward(self, texts: tp.List[str], device: tp.Union[torch.device, str]) -> tp.Tuple[torch.Tensor, torch.Tensor]:
-        
-        self.model.to(device)
+        device = torch.device(device)
+        autocast_dtype = torch.bfloat16 if device.type == "cuda" and torch.cuda.is_bf16_supported() else torch.float16
+
+        self.model.to(device=device, dtype=autocast_dtype if device.type == "cuda" else torch.float32)
         self.proj_out.to(device)
 
         encoded = self.tokenizer(
@@ -570,8 +573,13 @@ class T5Conditioner(Conditioner):
         attention_mask = encoded["attention_mask"].to(device).to(torch.bool)
 
         self.model.eval()
-            
-        with torch.cuda.amp.autocast(dtype=torch.float16), torch.set_grad_enabled(self.enable_grad):
+
+        if device.type == "cuda":
+            autocast_context = torch.amp.autocast("cuda", dtype=autocast_dtype)
+        else:
+            autocast_context = contextlib.nullcontext()
+
+        with autocast_context, torch.set_grad_enabled(self.enable_grad):
             embeddings = self.model(
                 input_ids=input_ids, attention_mask=attention_mask
             )["last_hidden_state"]    

@@ -30,6 +30,12 @@ import tracemalloc
 torch.backends.cudnn.allow_tf32 = False
 
 
+def _cuda_autocast_context(*, enabled: bool = True):
+    if not enabled or not torch.cuda.is_available():
+        return torch.amp.autocast("cuda", enabled=False)
+    return torch.amp.autocast("cuda", dtype=torch.get_autocast_dtype("cuda"))
+
+
 def _stack_padding_masks(metadata: tp.List[tp.Dict[str, tp.Any]], device: tp.Union[torch.device, str]) -> torch.Tensor:
     padding_masks = []
     for md in metadata:
@@ -382,7 +388,7 @@ class DiffusionCondTrainingWrapper(pl.LightningModule):
 
         p.tick("setup")
         # take_memory_snapshot("Before conditioner")
-        with torch.cuda.amp.autocast():
+        with _cuda_autocast_context():
             conditioning = self.diffusion.conditioner(metadata, self.device) # conditioning['prompt'][0].shape:[Batch, max_word_lenth, T5_MODEL_DIMS]=[1, 128, 768]
         # take_memory_snapshot("After conditioner")        
         # If mask_padding is on, randomly drop the padding masks to allow for learning silence padding
@@ -398,10 +404,10 @@ class DiffusionCondTrainingWrapper(pl.LightningModule):
             self.diffusion.pretransform.to(self.device)
 
             if not self.pre_encoded:
-                with torch.cuda.amp.autocast() and torch.set_grad_enabled(self.diffusion.pretransform.enable_grad):
+                with _cuda_autocast_context() and torch.set_grad_enabled(self.diffusion.pretransform.enable_grad):
                     self.diffusion.pretransform.train(self.diffusion.pretransform.enable_grad)
                     self.diffusion.pretransform = self.diffusion.pretransform.to(dtype=torch.float32).eval()
-                    with torch.cuda.amp.autocast(enabled=False):
+                    with _cuda_autocast_context(enabled=False):
                         diffusion_input = self.diffusion.pretransform.encode(diffusion_input.to(dtype=torch.float32))
                     p.tick("pretransform")
 
@@ -442,7 +448,7 @@ class DiffusionCondTrainingWrapper(pl.LightningModule):
         if use_padding_mask:
             extra_args["mask"] = padding_masks
 
-        with torch.cuda.amp.autocast():
+        with _cuda_autocast_context():
             p.tick("amp")
             # take_memory_snapshot("Before diffusion")
             output = self.diffusion(noised_inputs, t, cond=conditioning, cfg_dropout_prob = self.cfg_dropout_prob, **extra_args)
@@ -540,7 +546,7 @@ class DiffusionCondTrainingWrapper(pl.LightningModule):
             loss_info["audio_reals"] = diffusion_input
 
         p.tick("setup")
-        with torch.cuda.amp.autocast():
+        with _cuda_autocast_context():
             conditioning = self.diffusion.conditioner(metadata, self.device) # conditioning['prompt'][0].shape:[Batch, max_word_lenth, T5_MODEL_DIMS]=[1, 128, 768]
         # If mask_padding is on, randomly drop the padding masks to allow for learning silence padding
         use_padding_mask = self.mask_padding and random.random() > self.mask_padding_dropout
@@ -555,7 +561,7 @@ class DiffusionCondTrainingWrapper(pl.LightningModule):
             self.diffusion.pretransform.to(self.device)
 
             if not self.pre_encoded:
-                with torch.cuda.amp.autocast() and torch.set_grad_enabled(self.diffusion.pretransform.enable_grad):
+                with _cuda_autocast_context() and torch.set_grad_enabled(self.diffusion.pretransform.enable_grad):
                     self.diffusion.pretransform.train(self.diffusion.pretransform.enable_grad)
                     
                     diffusion_input = self.diffusion.pretransform.encode(diffusion_input)
@@ -599,7 +605,7 @@ class DiffusionCondTrainingWrapper(pl.LightningModule):
         if use_padding_mask:
             extra_args["mask"] = padding_masks
 
-        with torch.cuda.amp.autocast():
+        with _cuda_autocast_context():
             p.tick("amp")
             
             output = self.diffusion(noised_inputs, t, cond=conditioning, cfg_dropout_prob = self.cfg_dropout_prob, **extra_args)
