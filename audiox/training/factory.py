@@ -65,6 +65,7 @@ def create_training_wrapper_from_config(model_config, model):
         return DiffusionCondTrainingWrapper(
             model, 
             lr=training_config.get("learning_rate", None),
+            lora_lr=training_config.get("lora_learning_rate", None),
             mask_padding=training_config.get("mask_padding", False),
             mask_padding_dropout=training_config.get("mask_padding_dropout", 0.0),
             use_ema = training_config.get("use_ema", True),

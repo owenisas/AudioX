@@ -28,6 +28,7 @@
   "training": {
     "text_max_length": 256,
     "learning_rate": 1e-05,
+    "lora_learning_rate": 1e-04,
     "use_ema": false,
     "mask_padding": true,
     "cfg_dropout_prob": 0.1,

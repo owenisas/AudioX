@@ -147,6 +147,7 @@ def apply_finetune_defaults(
     training = patched_config.setdefault("training", {})
     training_defaults = {
         "learning_rate": 1e-5,
+        "lora_learning_rate": 1e-4,
         "use_ema": True,
         "mask_padding": True,
         "cfg_dropout_prob": 0.1,
@@ -194,7 +195,14 @@ def _unfreeze_module(module: tp.Any) -> tp.List[str]:
     unfrozen = []
     if module is None:
         return unfrozen
+    lora_base_param_ids: tp.Set[int] = set()
+    for child in module.modules():
+        if isinstance(child, LoRALinear):
+            for param in child.base.parameters():
+                lora_base_param_ids.add(id(param))
     for name, parameter in module.named_parameters():
+        if id(parameter) in lora_base_param_ids:
+            continue
         parameter.requires_grad = True
         unfrozen.append(name)
     return unfrozen
@@ -531,7 +539,7 @@ def create_trainer(
         "max_epochs": trainer_config.get("max_epochs", 1),
         "max_steps": trainer_config.get("max_steps", -1),
         "accumulate_grad_batches": trainer_config.get("accumulate_grad_batches", 1),
-        "gradient_clip_val": trainer_config.get("gradient_clip_val", 0.0),
+        "gradient_clip_val": trainer_config.get("gradient_clip_val", 1.0),
         "log_every_n_steps": trainer_config.get("log_every_n_steps", 10),
         "callbacks": callbacks,
         "logger": loggers[0] if len(loggers) == 1 else loggers,
