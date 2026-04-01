@@ -26,6 +26,8 @@ def build_run_config(
     include_video_conditioning: bool,
     standalone_ratio: float,
     continuation_ratio: float,
+    include_audio_conditioning: bool,
+    sample_strategy: str,
 ) -> dict:
     run_config = {
         "output_dir": output_dir,
@@ -44,11 +46,9 @@ def build_run_config(
             "seed": 0,
             "prompt_format": "natural",
             "include_video_conditioning": include_video_conditioning,
-            "include_audio_conditioning": True,
+            "include_audio_conditioning": include_audio_conditioning,
             "compute_video_sync_on_the_fly": False,
-            "sample_strategy": "weighted",
-            "standalone_ratio": standalone_ratio,
-            "continuation_ratio": continuation_ratio,
+            "sample_strategy": sample_strategy,
             "sample_text_prompt_candidates": True,
             "sample_text_prompt_candidates_for_eval": False,
         },
@@ -104,6 +104,9 @@ def build_run_config(
             "log_model": False,
         },
     }
+    if sample_strategy == "weighted":
+        run_config["data"]["standalone_ratio"] = standalone_ratio
+        run_config["data"]["continuation_ratio"] = continuation_ratio
     if huggingface_repo_id:
         run_config["huggingface"] = {
             "enabled": True,
@@ -161,6 +164,22 @@ def main() -> None:
         help="Disable video conditioning in the generated manifests and config.",
     )
     parser.add_argument(
+        "--disable-audio-conditioning",
+        action="store_true",
+        help="Disable audio conditioning in the generated config.",
+    )
+    parser.add_argument(
+        "--sample-strategy",
+        default="weighted",
+        choices=("weighted", "uniform"),
+        help="Training-time sampling strategy written into the generated config.",
+    )
+    parser.add_argument(
+        "--standalone-only",
+        action="store_true",
+        help="Drop generated continuation rows and keep only standalone samples.",
+    )
+    parser.add_argument(
         "--standalone-ratio",
         type=float,
         default=0.3,
@@ -177,6 +196,11 @@ def main() -> None:
         type=float,
         default=1e-6,
         help="Maximum allowed gap between prev end and next start when generating continuation pairs.",
+    )
+    parser.add_argument(
+        "--sound-effects-root",
+        default=None,
+        help="Optional extra sound-effects directory or manifest.jsonl to include as standalone rows.",
     )
     parser.add_argument("--wandb-project", default="audiox-finetune", help="Weights & Biases project name.")
     parser.add_argument("--wandb-entity", default=None, help="Optional Weights & Biases entity.")
@@ -215,6 +239,8 @@ def main() -> None:
         caption_field=args.caption_field,
         include_video=not args.disable_video_conditioning,
         adjacency_tolerance=args.adjacency_tolerance,
+        sound_effects_root_or_manifest=args.sound_effects_root,
+        standalone_only=args.standalone_only,
     )
 
     run_name = args.run_name or f"mixed-preference-{Path(dataset_root_or_manifest).stem}"
@@ -234,6 +260,8 @@ def main() -> None:
         include_video_conditioning=not args.disable_video_conditioning,
         standalone_ratio=args.standalone_ratio,
         continuation_ratio=args.continuation_ratio,
+        include_audio_conditioning=not args.disable_audio_conditioning,
+        sample_strategy=args.sample_strategy,
     )
 
     config_path = output_dir / "config_mixed_preference.json"

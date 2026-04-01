@@ -18,6 +18,7 @@ from audiox.data.asmr import (
 from audiox.data.mixed_preference import (
     DEFAULT_MIXED_PREFERENCE_SOURCE_FAMILIES,
     build_mixed_preference_manifest_rows,
+    build_sound_effect_manifest_rows,
     collect_text_prompt_candidates,
     prepare_mixed_preference_manifests,
 )
@@ -1008,6 +1009,97 @@ class IFCapsFineTuneTests(unittest.TestCase):
             self.assertTrue(Path(summary["train_manifest_path"]).exists())
             self.assertTrue(Path(summary["val_manifest_path"]).exists())
             self.assertTrue(Path(summary["test_manifest_path"]).exists())
+
+    def test_build_sound_effect_manifest_rows_scans_directory_and_builds_prompts(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir) / "sound_effects"
+            barber_dir = root / "Barber"
+            barber_dir.mkdir(parents=True)
+            sound_path = barber_dir / "buzzing-electric-razor-joshua-chivers-1-00-10.mp3"
+            sound_path.write_bytes(b"fake mp3 bytes")
+
+            rows = build_sound_effect_manifest_rows(root, media_root=Path(tmpdir) / "remote" / "sound_effects")
+
+            self.assertEqual(len(rows), 1)
+            row = rows[0]
+            self.assertEqual(row["sample_type"], "standalone")
+            self.assertEqual(row["source_family"], "sound_effects")
+            self.assertEqual(row["split"], "train")
+            self.assertEqual(row["sound_effects_category"], "Barber")
+            self.assertTrue(row["audio_path"].endswith("sound_effects/Barber/buzzing-electric-razor-joshua-chivers-1-00-10.mp3"))
+            self.assertEqual(
+                row["text_prompt_candidates"][:2],
+                [
+                    "barber sound effects, buzzing electric razor joshua chivers",
+                    "buzzing electric razor joshua chivers",
+                ],
+            )
+
+    def test_prepare_mixed_preference_manifests_can_include_sound_effects_and_drop_continuations(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            dataset_root = Path(tmpdir) / "dataset"
+            audio_dir = dataset_root / "audio" / "audio_targets"
+            manifest_dir = dataset_root / "audio"
+            audio_dir.mkdir(parents=True)
+            manifest_dir.mkdir(parents=True, exist_ok=True)
+
+            _write_wav(audio_dir / "asmr_0000.wav", sample_rate=16000)
+            _write_wav(audio_dir / "asmr_0001.wav", sample_rate=16000)
+            records = [
+                {
+                    "clip_id": "asmr_0000",
+                    "clip_index": 0,
+                    "sample_group_id": "group-asmr",
+                    "audio_path": str(audio_dir / "asmr_0000.wav"),
+                    "tagged_training_caption": "[asmr]: zero",
+                    "source_family": "asmr",
+                    "preference_tags": ["asmr"],
+                    "start_s": 0.0,
+                    "end_s": 10.0,
+                    "split": "train",
+                },
+                {
+                    "clip_id": "asmr_0001",
+                    "clip_index": 1,
+                    "sample_group_id": "group-asmr",
+                    "audio_path": str(audio_dir / "asmr_0001.wav"),
+                    "tagged_training_caption": "[asmr]: one",
+                    "source_family": "asmr",
+                    "preference_tags": ["asmr"],
+                    "start_s": 10.0,
+                    "end_s": 20.0,
+                    "split": "train",
+                },
+            ]
+            manifest_path = manifest_dir / "audio_manifest_split.jsonl"
+            with manifest_path.open("w") as handle:
+                for record in records:
+                    handle.write(json.dumps(record) + "\n")
+
+            sound_effects_root = Path(tmpdir) / "Audio"
+            forest_dir = sound_effects_root / "Forest"
+            forest_dir.mkdir(parents=True)
+            (forest_dir / "coyotes-howling-in-the-jungle-felix-blume-1-00-28.mp3").write_bytes(b"fake mp3 bytes")
+
+            output_dir = Path(tmpdir) / "prepared"
+            summary = prepare_mixed_preference_manifests(
+                dataset_root,
+                output_dir,
+                media_root=Path(tmpdir) / "remote_dataset",
+                sound_effects_root_or_manifest=sound_effects_root,
+                standalone_only=True,
+            )
+
+            self.assertEqual(summary["sample_type_counts"], {"standalone": 3})
+            self.assertEqual(summary["source_family_counts"]["sound_effects"], 1)
+            self.assertEqual(summary["split_counts"]["train"], 3)
+            with Path(summary["train_manifest_path"]).open() as handle:
+                train_rows = [json.loads(line) for line in handle]
+            self.assertEqual(len(train_rows), 3)
+            sound_effect_row = next(row for row in train_rows if row["source_family"] == "sound_effects")
+            self.assertTrue(sound_effect_row["audio_path"].endswith("remote_dataset/sound_effects/Forest/coyotes-howling-in-the-jungle-felix-blume-1-00-28.mp3"))
+            self.assertEqual(sound_effect_row["sample_type"], "standalone")
+            self.assertIn("coyotes howling in the jungle felix blume", sound_effect_row["text_prompt"])
 
     def test_mixed_preference_manifest_smoke_dataset_shapes_with_video_enabled(self):
         with tempfile.TemporaryDirectory() as tmpdir:

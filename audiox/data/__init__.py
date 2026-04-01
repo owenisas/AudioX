@@ -22,6 +22,7 @@ from .ifcaps import (
 from .mixed_preference import (
     DEFAULT_MIXED_PREFERENCE_SOURCE_FAMILIES,
     build_mixed_preference_manifest_rows,
+    build_sound_effect_manifest_rows,
     collect_text_prompt_candidates,
     prepare_mixed_preference_manifests,
     split_rows_by_split,
@@ -47,6 +48,7 @@ __all__ = [
     "serialize_ifcaps_to_xml",
     "DEFAULT_MIXED_PREFERENCE_SOURCE_FAMILIES",
     "build_mixed_preference_manifest_rows",
+    "build_sound_effect_manifest_rows",
     "collect_text_prompt_candidates",
     "prepare_mixed_preference_manifests",
     "split_rows_by_split",

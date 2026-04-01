@@ -1,10 +1,13 @@
 import json
+import re
 import typing as tp
 from collections import Counter, defaultdict
 from pathlib import Path
 
 
 DEFAULT_MIXED_PREFERENCE_SOURCE_FAMILIES = ("asmr", "ambience", "music")
+SOUND_EFFECTS_SOURCE_FAMILY = "sound_effects"
+SUPPORTED_SOUND_EFFECT_EXTENSIONS = {".mp3", ".wav", ".flac", ".ogg", ".m4a"}
 
 
 def _load_jsonl(path: Path) -> tp.List[tp.Dict[str, tp.Any]]:
@@ -87,6 +90,16 @@ def _resolve_source_manifest(path: tp.Union[str, Path]) -> tp.Tuple[Path, Path]:
     return dataset_root.resolve(), manifest_path.resolve()
 
 
+def _resolve_optional_manifest_root(path: tp.Union[str, Path]) -> tp.Tuple[Path, tp.Optional[Path]]:
+    candidate = Path(path).expanduser().resolve()
+    if candidate.is_dir():
+        manifest_path = candidate / "manifest.jsonl"
+        return candidate, manifest_path if manifest_path.exists() else None
+    if not candidate.exists():
+        raise ValueError(f"Optional manifest path does not exist: {candidate}")
+    return candidate.parent.resolve(), candidate.resolve()
+
+
 def _resolve_source_path(value: tp.Any, base_dir: Path) -> tp.Optional[Path]:
     text = _first_nonempty(value)
     if not text:
@@ -109,6 +122,21 @@ def _rewrite_media_path(
         return str(source_path)
     try:
         relative_path = source_path.relative_to(dataset_root)
+    except ValueError:
+        return str(source_path)
+    return str(media_root / relative_path)
+
+
+def _rewrite_sound_effect_path(
+    source_path: Path,
+    *,
+    sound_effects_root: Path,
+    media_root: tp.Optional[Path],
+) -> str:
+    if media_root is None:
+        return str(source_path)
+    try:
+        relative_path = source_path.relative_to(sound_effects_root)
     except ValueError:
         return str(source_path)
     return str(media_root / relative_path)
@@ -184,6 +212,111 @@ def _resolve_split(record: tp.Dict[str, tp.Any]) -> str:
     if split in {"train", "val", "test"}:
         return split
     return "train"
+
+
+def _normalize_sound_effect_tokens(stem: str) -> tp.List[str]:
+    tokens = [token for token in re.split(r"[-_]+", stem.lower()) if token]
+    while tokens and tokens[-1].isdigit():
+        tokens.pop()
+    return tokens
+
+
+def _build_sound_effect_prompt_candidates(category: str, filename: str) -> tp.List[str]:
+    stem = Path(filename).stem
+    tokens = _normalize_sound_effect_tokens(stem)
+    title = " ".join(tokens).strip() or stem.replace("_", " ").replace("-", " ")
+    category_text = category.replace("_", " ").strip().lower() or "sound effects"
+    candidates = [
+        f"{category_text} sound effects, {title}".strip(", "),
+        title,
+        f"{category_text} ambience",
+    ]
+    seen: tp.Set[str] = set()
+    deduped: tp.List[str] = []
+    for candidate in candidates:
+        key = _normalize_prompt_key(candidate)
+        if key and key not in seen:
+            seen.add(key)
+            deduped.append(candidate)
+    return deduped
+
+
+def build_sound_effect_manifest_rows(
+    sound_effects_root_or_manifest: tp.Union[str, Path],
+    *,
+    media_root: tp.Optional[tp.Union[str, Path]] = None,
+    split: str = "train",
+) -> tp.List[tp.Dict[str, tp.Any]]:
+    sound_effects_root, manifest_path = _resolve_optional_manifest_root(sound_effects_root_or_manifest)
+    media_root_path = Path(media_root).expanduser() if media_root else None
+
+    if manifest_path is not None:
+        manifest_records = _load_jsonl(manifest_path)
+        candidates: tp.List[tp.Dict[str, tp.Any]] = []
+        for record in manifest_records:
+            relative_path = _first_nonempty(record.get("relative_path"))
+            if not relative_path:
+                continue
+            audio_path = (sound_effects_root / relative_path).resolve()
+            candidates.append(
+                {
+                    "audio_path": audio_path,
+                    "category": _first_nonempty(record.get("category"), audio_path.parent.name, "sound_effects"),
+                    "filename": _first_nonempty(record.get("filename"), audio_path.name),
+                }
+            )
+    else:
+        candidates = []
+        for audio_path in sorted(sound_effects_root.rglob("*")):
+            if not audio_path.is_file() or audio_path.suffix.lower() not in SUPPORTED_SOUND_EFFECT_EXTENSIONS:
+                continue
+            candidates.append(
+                {
+                    "audio_path": audio_path.resolve(),
+                    "category": audio_path.parent.name,
+                    "filename": audio_path.name,
+                }
+            )
+
+    rows: tp.List[tp.Dict[str, tp.Any]] = []
+    split_name = split if split in {"train", "val", "test"} else "train"
+    counters: tp.Dict[str, int] = defaultdict(int)
+    for candidate in candidates:
+        audio_path = Path(candidate["audio_path"]).resolve()
+        if not audio_path.exists():
+            continue
+        category = _first_nonempty(candidate.get("category"), audio_path.parent.name, "sound_effects")
+        filename = _first_nonempty(candidate.get("filename"), audio_path.name)
+        prompt_candidates = _build_sound_effect_prompt_candidates(category, filename)
+        if not prompt_candidates:
+            continue
+        category_key = category.lower().replace(" ", "_")
+        clip_id = f"sound_effects_{audio_path.stem}"
+        chunk_index = counters[category_key]
+        counters[category_key] += 1
+        rows.append(
+            {
+                "audio_path": _rewrite_sound_effect_path(
+                    audio_path,
+                    sound_effects_root=sound_effects_root,
+                    media_root=media_root_path,
+                ),
+                "text_prompt": prompt_candidates[0],
+                "text_prompt_candidates": prompt_candidates,
+                "sample_type": "standalone",
+                "sequence_id": f"{SOUND_EFFECTS_SOURCE_FAMILY}:{category_key}",
+                "chunk_index": chunk_index,
+                "seconds_start": 0.0,
+                "seconds_total": 10.0,
+                "video_duration_seconds": 10.0,
+                "source_family": SOUND_EFFECTS_SOURCE_FAMILY,
+                "preference_tags": [SOUND_EFFECTS_SOURCE_FAMILY, category_key],
+                "clip_id": clip_id,
+                "sound_effects_category": category,
+                "split": split_name,
+            }
+        )
+    return rows
 
 
 def _resolve_sequence_id(record: tp.Dict[str, tp.Any]) -> str:
@@ -336,6 +469,9 @@ def prepare_mixed_preference_manifests(
     caption_field: str = "tagged_training_caption",
     include_video: bool = True,
     adjacency_tolerance: float = 1e-6,
+    sound_effects_root_or_manifest: tp.Optional[tp.Union[str, Path]] = None,
+    sound_effects_media_root: tp.Optional[tp.Union[str, Path]] = None,
+    standalone_only: bool = False,
 ) -> tp.Dict[str, tp.Any]:
     dataset_root, manifest_path = _resolve_source_manifest(dataset_root_or_manifest)
     records = _load_jsonl(manifest_path)
@@ -348,6 +484,18 @@ def prepare_mixed_preference_manifests(
         include_video=include_video,
         adjacency_tolerance=adjacency_tolerance,
     )
+    resolved_sound_effects_media_root = sound_effects_media_root
+    if resolved_sound_effects_media_root is None and media_root:
+        resolved_sound_effects_media_root = str(Path(media_root).expanduser() / "sound_effects")
+    if sound_effects_root_or_manifest:
+        rows.extend(
+            build_sound_effect_manifest_rows(
+                sound_effects_root_or_manifest,
+                media_root=resolved_sound_effects_media_root,
+            )
+        )
+    if standalone_only:
+        rows = [row for row in rows if row.get("sample_type") == "standalone"]
     split_rows = split_rows_by_split(rows)
 
     output_dir = Path(output_dir)
@@ -377,5 +525,12 @@ def prepare_mixed_preference_manifests(
         "source_families": list(source_families),
         "include_video": include_video,
         "media_root": str(Path(media_root).expanduser()) if media_root else None,
+        "sound_effects_root_or_manifest": str(Path(sound_effects_root_or_manifest).expanduser())
+        if sound_effects_root_or_manifest
+        else None,
+        "sound_effects_media_root": str(Path(resolved_sound_effects_media_root).expanduser())
+        if resolved_sound_effects_media_root
+        else None,
+        "standalone_only": standalone_only,
         "adjacency_tolerance": adjacency_tolerance,
     }
