@@ -1,4 +1,5 @@
 import json
+import re
 import typing as tp
 from pathlib import Path
 
@@ -22,6 +23,43 @@ def load_prompt_list(path: tp.Union[str, Path]) -> tp.List[str]:
         return [str(prompt).strip() for prompt in prompts if str(prompt).strip()]
 
     return [line.strip() for line in prompt_path.read_text().splitlines() if line.strip()]
+
+
+def load_prompt_manifest(path: tp.Union[str, Path]) -> tp.List[tp.Dict[str, str]]:
+    prompt_path = Path(path)
+    suffix = prompt_path.suffix.lower()
+
+    if suffix == ".jsonl":
+        records = []
+        for line in prompt_path.read_text().splitlines():
+            line = line.strip()
+            if not line:
+                continue
+            payload = json.loads(line)
+            if not isinstance(payload, dict):
+                raise ValueError(f"Prompt manifest row must be an object: {prompt_path}")
+            records.append(payload)
+    elif suffix == ".json":
+        payload = json.loads(prompt_path.read_text())
+        if isinstance(payload, dict):
+            records = payload.get("prompts", [])
+        elif isinstance(payload, list):
+            records = payload
+        else:
+            raise ValueError(f"Unsupported JSON prompt manifest shape in {prompt_path}")
+    else:
+        records = [{"clip_id": f"prompt_{idx:03d}", "text_prompt": prompt} for idx, prompt in enumerate(load_prompt_list(prompt_path))]
+
+    normalized_records: tp.List[tp.Dict[str, str]] = []
+    for index, record in enumerate(records):
+        if not isinstance(record, dict):
+            raise ValueError(f"Prompt manifest entry {index} must be an object.")
+        text_prompt = str(record.get("text_prompt") or record.get("prompt") or "").strip()
+        if not text_prompt:
+            raise ValueError(f"Prompt manifest entry {index} is missing text_prompt/prompt.")
+        clip_id = str(record.get("clip_id") or f"prompt_{index:03d}").strip()
+        normalized_records.append({"clip_id": clip_id, "text_prompt": text_prompt})
+    return normalized_records
 
 
 def build_zero_video_prompt(
@@ -84,6 +122,26 @@ def build_continuation_conditioning(
             "seconds_total": seconds_total,
         }
     ]
+
+
+def build_standalone_conditioning(
+    text_prompt: str,
+    *,
+    sample_rate: int,
+    sample_size: int,
+    video_fps: int,
+    audio_prompt_num_samples: int,
+    device: tp.Union[str, torch.device] = "cpu",
+) -> tp.List[tp.Dict[str, tp.Any]]:
+    return build_continuation_conditioning(
+        text_prompt,
+        sample_rate=sample_rate,
+        sample_size=sample_size,
+        video_fps=video_fps,
+        audio_prompt_num_samples=audio_prompt_num_samples,
+        previous_audio=None,
+        device=device,
+    )
 
 
 def crossfade_stitch(
@@ -210,4 +268,117 @@ def run_asmr_continuation(
         "sidecar_path": str(sidecar_path),
         "sample_rate": sample_rate,
         "sample_size": sample_size,
+    }
+
+
+def _sanitize_clip_id(value: str, index: int) -> str:
+    sanitized = re.sub(r"[^A-Za-z0-9._-]+", "_", value).strip("._")
+    if sanitized:
+        return sanitized
+    return f"prompt_{index:03d}"
+
+
+def run_soundfx_eval_batch(
+    prompt_manifest: tp.Union[str, Path],
+    *,
+    output_dir: tp.Union[str, Path],
+    pretrained_name: str = "HKUSTAudio/AudioX-MAF-MMDiT",
+    lora_path: tp.Optional[tp.Union[str, Path]] = None,
+    cache_dir: tp.Optional[tp.Union[str, Path]] = None,
+    device: tp.Optional[str] = None,
+    steps: int = 250,
+    cfg_scale: float = 7.0,
+    sigma_min: float = 0.3,
+    sigma_max: float = 500.0,
+    sampler_type: str = "dpmpp-3m-sde",
+    seed_base: int = 0,
+) -> tp.Dict[str, tp.Any]:
+    records = load_prompt_manifest(prompt_manifest)
+    if not records:
+        raise ValueError("run_soundfx_eval_batch requires at least one prompt.")
+
+    resolved_device = device or ("cuda" if torch.cuda.is_available() else "cpu")
+    model, model_config = get_pretrained_model(pretrained_name, cache_dir=cache_dir, lora_path=lora_path)
+    model = model.to(resolved_device).eval()
+
+    sample_rate = model_config["sample_rate"]
+    sample_size = model_config["sample_size"]
+    video_fps = model_config.get("video_fps", 5)
+    audio_prompt_num_samples = extract_audio_prompt_num_samples(model_config, sample_size)
+
+    output_dir = Path(output_dir)
+    wav_dir = output_dir / "wavs"
+    wav_dir.mkdir(parents=True, exist_ok=True)
+
+    outputs_path = output_dir / "outputs.jsonl"
+    prompt_copy_path = output_dir / "prompt_manifest.json"
+    generation_config_path = output_dir / "generation_config.json"
+
+    prompt_copy_path.write_text(json.dumps(records, indent=2))
+    generation_config_path.write_text(
+        json.dumps(
+            {
+                "pretrained_name": pretrained_name,
+                "lora_path": str(lora_path) if lora_path is not None else None,
+                "steps": steps,
+                "cfg_scale": cfg_scale,
+                "sigma_min": sigma_min,
+                "sigma_max": sigma_max,
+                "sampler_type": sampler_type,
+                "seed_base": seed_base,
+                "sample_rate": sample_rate,
+                "sample_size": sample_size,
+                "audio_prompt_num_samples": audio_prompt_num_samples,
+                "video_fps": video_fps,
+            },
+            indent=2,
+        )
+    )
+
+    import torchaudio
+
+    output_rows: tp.List[tp.Dict[str, tp.Any]] = []
+    with outputs_path.open("w") as handle:
+        for index, record in enumerate(records):
+            clip_id = _sanitize_clip_id(record["clip_id"], index)
+            seed = seed_base + index
+            conditioning = build_standalone_conditioning(
+                record["text_prompt"],
+                sample_rate=sample_rate,
+                sample_size=sample_size,
+                video_fps=video_fps,
+                audio_prompt_num_samples=audio_prompt_num_samples,
+                device=resolved_device,
+            )
+            generated = generate_diffusion_cond(
+                model,
+                steps=steps,
+                cfg_scale=cfg_scale,
+                conditioning=conditioning,
+                sample_size=sample_size,
+                seed=seed,
+                sigma_min=sigma_min,
+                sigma_max=sigma_max,
+                sampler_type=sampler_type,
+                device=resolved_device,
+            ).detach().cpu()
+
+            wav_path = wav_dir / f"{clip_id}.wav"
+            torchaudio.save(str(wav_path), generated.squeeze(0).to(torch.float32), sample_rate)
+
+            output_row = {
+                "clip_id": clip_id,
+                "text_prompt": record["text_prompt"],
+                "seed": seed,
+                "wav_path": str(wav_path),
+            }
+            handle.write(json.dumps(output_row) + "\n")
+            output_rows.append(output_row)
+
+    return {
+        "prompt_manifest_path": str(prompt_copy_path),
+        "generation_config_path": str(generation_config_path),
+        "outputs_path": str(outputs_path),
+        "wav_dir": str(wav_dir),
+        "row_count": len(output_rows),
     }

@@ -31,6 +31,11 @@ from audiox.data.ifcaps import (
     serialize_ifcaps_to_xml,
 )
 from audiox.inference.asmr import build_continuation_conditioning, crossfade_stitch, prepare_audio_prompt
+from audiox.inference.asmr import (
+    build_standalone_conditioning,
+    load_prompt_manifest,
+    run_soundfx_eval_batch,
+)
 from audiox.models.lora import (
     LoRALinear,
     count_parameters,
@@ -1105,6 +1110,98 @@ class IFCapsFineTuneTests(unittest.TestCase):
         sample = conditioning[0]
         self.assertTrue(torch.all(sample["audio_prompt"][:, :, :64] == 1))
         self.assertTrue(torch.all(sample["audio_prompt"][:, :, 64:] == 0))
+
+    def test_build_standalone_conditioning_uses_zero_audio_and_video(self):
+        conditioning = build_standalone_conditioning(
+            "Gentle page turning and soft tapping.",
+            sample_rate=48000,
+            sample_size=480000,
+            video_fps=5,
+            audio_prompt_num_samples=128,
+            device="cpu",
+        )
+        sample = conditioning[0]
+        self.assertEqual(sample["audio_prompt"].shape, (1, 2, 128))
+        self.assertTrue(torch.all(sample["audio_prompt"] == 0))
+        self.assertEqual(sample["video_prompt"]["video_tensors"].shape, (1, 50, 3, 224, 224))
+
+    def test_load_prompt_manifest_supports_jsonl(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            manifest_path = Path(tmpdir) / "prompts.jsonl"
+            manifest_path.write_text(
+                json.dumps({"clip_id": "clip_a", "text_prompt": "soft tapping"}) + "\n" +
+                json.dumps({"clip_id": "clip_b", "prompt": "gentle brushing"}) + "\n"
+            )
+            records = load_prompt_manifest(manifest_path)
+        self.assertEqual(
+            records,
+            [
+                {"clip_id": "clip_a", "text_prompt": "soft tapping"},
+                {"clip_id": "clip_b", "text_prompt": "gentle brushing"},
+            ],
+        )
+
+    def test_run_soundfx_eval_batch_writes_prompt_aligned_outputs(self):
+        class DummyEvalModel(nn.Module):
+            def __init__(self):
+                super().__init__()
+                self.pretransform = None
+                self.sample_rate = 48000
+                self.io_channels = 2
+                self.conditioner = lambda conditioning, device: conditioning
+                self.get_conditioning_inputs = lambda tensors, negative=False: tensors
+
+            def to(self, device):
+                return self
+
+            def eval(self):
+                return self
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmpdir_path = Path(tmpdir)
+            manifest_path = tmpdir_path / "prompts.jsonl"
+            manifest_path.write_text(
+                json.dumps({"clip_id": "clip/a", "text_prompt": "soft tapping"}) + "\n" +
+                json.dumps({"clip_id": "clip_b", "text_prompt": "gentle brushing"}) + "\n"
+            )
+
+            save_calls = []
+
+            def fake_save(path, tensor, sample_rate):
+                save_calls.append((Path(path).name, tuple(tensor.shape), sample_rate))
+
+            with mock.patch(
+                "audiox.inference.asmr.get_pretrained_model",
+                return_value=(DummyEvalModel(), {"sample_rate": 48000, "sample_size": 480000, "video_fps": 5}),
+            ), mock.patch(
+                "audiox.inference.asmr.generate_diffusion_cond",
+                side_effect=lambda *args, **kwargs: torch.ones(1, 2, 32) * kwargs["seed"],
+            ), mock.patch(
+                "torchaudio.save",
+                side_effect=fake_save,
+            ):
+                summary = run_soundfx_eval_batch(
+                    manifest_path,
+                    output_dir=tmpdir_path / "eval",
+                    pretrained_name="HKUSTAudio/AudioX-MAF-MMDiT",
+                    lora_path="/tmp/final-lora-state.pt",
+                    device="cpu",
+                    steps=5,
+                    cfg_scale=4.0,
+                    sigma_min=0.1,
+                    sigma_max=1.0,
+                    sampler_type="dpmpp-3m-sde",
+                    seed_base=100,
+                )
+
+            outputs = [json.loads(line) for line in Path(summary["outputs_path"]).read_text().splitlines()]
+            self.assertEqual(summary["row_count"], 2)
+            self.assertEqual(outputs[0]["clip_id"], "clip_a")
+            self.assertEqual(outputs[0]["seed"], 100)
+            self.assertEqual(outputs[1]["clip_id"], "clip_b")
+            self.assertEqual(outputs[1]["seed"], 101)
+            self.assertEqual(save_calls[0][0], "clip_a.wav")
+            self.assertEqual(save_calls[1][0], "clip_b.wav")
 
     def test_crossfade_stitch_outputs_expected_length(self):
         first = torch.ones(1, 2, 10)
