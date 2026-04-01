@@ -2,9 +2,9 @@
   "pretrained_name": "HKUSTAudio/AudioX-MAF-MMDiT",
   "output_dir": "./outputs/audiox_asmr_continuation",
   "asmr_continuation": {
-    "sample_rate": 44100,
-    "sample_size": 485100,
-    "seconds_total": 11.0,
+    "sample_rate": 48000,
+    "sample_size": 480000,
+    "seconds_total": 10.0,
     "sample_strategy": "weighted",
     "standalone_ratio": 0.3,
     "continuation_ratio": 0.7
@@ -27,7 +27,7 @@
     "sample_strategy": "weighted",
     "standalone_ratio": 0.3,
     "continuation_ratio": 0.7,
-    "video_duration_seconds": 11.0
+    "video_duration_seconds": 10.0
   },
   "training": {
     "text_max_length": 256,
