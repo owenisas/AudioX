@@ -726,7 +726,7 @@ class IFCapsFineTuneTests(unittest.TestCase):
             _, metadata = dataset[0]
             self.assertTrue(torch.all(metadata["audio_prompt"] == 0))
 
-    def test_dataset_absent_audio_prompt_falls_back_to_audio_path(self):
+    def test_dataset_absent_audio_prompt_uses_zero_conditioning(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             tmpdir_path = Path(tmpdir)
             audio_path = tmpdir_path / "sample.wav"
@@ -743,12 +743,8 @@ class IFCapsFineTuneTests(unittest.TestCase):
                 include_audio_conditioning=True,
                 audio_prompt_num_samples=8000,
             )
-            with mock.patch(
-                "audiox.data.ifcaps.load_and_process_audio",
-                return_value=torch.ones(2, 8000),
-            ):
-                _, metadata = dataset[0]
-            self.assertGreater(float(torch.abs(metadata["audio_prompt"]).sum()), 0.0)
+            _, metadata = dataset[0]
+            self.assertTrue(torch.all(metadata["audio_prompt"] == 0))
 
     def test_dataset_invalid_audio_prompt_falls_back_to_zero_conditioning(self):
         with tempfile.TemporaryDirectory() as tmpdir:

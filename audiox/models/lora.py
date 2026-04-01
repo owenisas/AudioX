@@ -12,10 +12,7 @@ DEFAULT_LORA_TARGET_PATTERNS = (
     "to_qkv",
     "to_out",
     ".qkv",
-    "proj_mm_tokens",
-    "proj_mm_seq_len",
-    "gating_network.0",
-    "gating_network.2",
+    "ffn",
 )
 
 

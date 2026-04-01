@@ -86,7 +86,7 @@ def build_run_config(
             "max_epochs": 1,
             "max_steps": 1,
             "accumulate_grad_batches": 1,
-            "gradient_clip_val": 0.0,
+            "gradient_clip_val": 1.0,
             "log_every_n_steps": 1,
             "num_sanity_val_steps": 0,
             "limit_train_batches": 1,

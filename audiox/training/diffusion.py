@@ -1,4 +1,3 @@
-import copy
 import pytorch_lightning as pl
 import sys, gc
 import random
@@ -338,9 +337,10 @@ class DiffusionCondTrainingWrapper(pl.LightningModule):
             optimizer_configs = {
                 "diffusion": {
                     "optimizer": {
-                        "type": "Adam",
+                        "type": "AdamW",
                         "config": {
-                            "lr": lr
+                            "lr": lr,
+                            "weight_decay": 0.001,
                         }
                     }
                 }
@@ -359,42 +359,31 @@ class DiffusionCondTrainingWrapper(pl.LightningModule):
         from ..models.lora import is_lora_parameter_name
 
         diffusion_opt_config = self.optimizer_configs['diffusion']
-        trainable_parameters = [
-            parameter for parameter in self.diffusion.parameters() if parameter.requires_grad
-        ]
-        if not trainable_parameters:
+        opt_config = diffusion_opt_config['optimizer']['config']
+        base_lr = opt_config.get('lr', 1e-5)
+
+        lora_params = []
+        base_params = []
+        for name, param in self.diffusion.named_parameters():
+            if not param.requires_grad:
+                continue
+            if is_lora_parameter_name(name):
+                lora_params.append(param)
+            else:
+                base_params.append(param)
+
+        if not lora_params and not base_params:
             raise ValueError("No trainable diffusion parameters found for optimizer setup.")
 
-        if self.lora_lr is not None:
-            named_trainable_parameters = [
-                (name, parameter)
-                for name, parameter in self.diffusion.named_parameters()
-                if parameter.requires_grad
+        if lora_params and self.lora_lr is not None:
+            param_groups = [
+                {"params": base_params, "lr": base_lr},
+                {"params": lora_params, "lr": self.lora_lr},
             ]
-            lora_parameters = [
-                parameter
-                for name, parameter in named_trainable_parameters
-                if is_lora_parameter_name(name)
-            ]
-            base_parameters = [
-                parameter
-                for name, parameter in named_trainable_parameters
-                if not is_lora_parameter_name(name)
-            ]
-            if lora_parameters and base_parameters:
-                optimizer_config = copy.deepcopy(diffusion_opt_config['optimizer'])
-                optimizer_lr = optimizer_config.setdefault('config', {}).get('lr')
-                if optimizer_lr is None:
-                    raise ValueError("Diffusion optimizer config must define lr when using lora_learning_rate.")
-                param_groups = [
-                    {"params": base_parameters, "lr": optimizer_lr},
-                    {"params": lora_parameters, "lr": self.lora_lr},
-                ]
-                opt_diff = create_optimizer_from_config(optimizer_config, param_groups)
-            else:
-                opt_diff = create_optimizer_from_config(diffusion_opt_config['optimizer'], trainable_parameters)
         else:
-            opt_diff = create_optimizer_from_config(diffusion_opt_config['optimizer'], trainable_parameters)
+            param_groups = [{"params": lora_params + base_params, "lr": base_lr}]
+
+        opt_diff = create_optimizer_from_config(diffusion_opt_config['optimizer'], param_groups)
 
         if "scheduler" in diffusion_opt_config:
             sched_diff = create_scheduler_from_config(diffusion_opt_config['scheduler'], opt_diff)

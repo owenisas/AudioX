@@ -195,6 +195,7 @@ def _unfreeze_module(module: tp.Any) -> tp.List[str]:
     unfrozen = []
     if module is None:
         return unfrozen
+    # Identify base weights inside LoRA wrappers so they stay frozen.
     lora_base_param_ids: tp.Set[int] = set()
     for child in module.modules():
         if isinstance(child, LoRALinear):

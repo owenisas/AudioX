@@ -196,7 +196,7 @@ def load_and_process_audio(audio_path, sample_rate, seconds_start, seconds_total
     audio_tensor = audio_tensor[:, start_index:end_index]
     if audio_tensor.shape[1] < target_length:
         pad_length = target_length - audio_tensor.shape[1]
-        audio_tensor = F.pad(audio_tensor, (pad_length, 0))
+        audio_tensor = F.pad(audio_tensor, (0, pad_length))
     return audio_tensor
 
 def generate_cond(

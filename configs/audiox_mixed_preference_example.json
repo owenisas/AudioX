@@ -4,7 +4,7 @@
   "data": {
     "train_manifest": "./data/mixed_preference_train.jsonl",
     "val_manifest": "./data/mixed_preference_val.jsonl",
-    "batch_size": 1,
+    "batch_size": 2,
     "eval_batch_size": 1,
     "num_workers": 2,
     "pin_memory": true,
@@ -29,7 +29,7 @@
     "text_max_length": 256,
     "learning_rate": 1e-05,
     "lora_learning_rate": 1e-04,
-    "use_ema": false,
+    "use_ema": true,
     "mask_padding": true,
     "cfg_dropout_prob": 0.1,
     "timestep_sampler": "uniform",
@@ -41,18 +41,21 @@
     "devices": 1,
     "precision": "16-mixed",
     "max_epochs": 1,
-    "max_steps": 3000,
-    "accumulate_grad_batches": 1,
+    "max_steps": 6000,
+    "accumulate_grad_batches": 4,
     "gradient_clip_val": 1.0,
     "log_every_n_steps": 10,
-    "num_sanity_val_steps": 0
+    "num_sanity_val_steps": 0,
+    "val_check_interval": 500
   },
   "checkpointing": {
     "dirpath": "./outputs/audiox_mixed_preference/checkpoints",
     "filename": "step={step}",
     "enabled": true,
     "save_last": true,
-    "save_top_k": -1,
+    "monitor": "val/loss",
+    "mode": "min",
+    "save_top_k": 3,
     "every_n_train_steps": 500,
     "save_final_checkpoint": true,
     "save_lora_only": true,
@@ -60,9 +63,9 @@
   },
   "lora": {
     "enabled": true,
-    "rank": 8,
-    "alpha": 16.0,
-    "dropout": 0.0,
+    "rank": 16,
+    "alpha": 32.0,
+    "dropout": 0.05,
     "freeze_non_lora": true,
     "target_patterns": [
       "to_q",
@@ -70,10 +73,7 @@
       "to_qkv",
       "to_out",
       ".qkv",
-      "proj_mm_tokens",
-      "proj_mm_seq_len",
-      "gating_network.0",
-      "gating_network.2"
+      "ffn"
     ]
   },
   "wandb": {

@@ -586,7 +586,7 @@ class IFCapsFineTuneDataset(Dataset):
             "video_sync_frames": video_sync_frames,
         }
 
-    def _load_audio_prompt(self, record: tp.Dict[str, tp.Any], seconds_start: int, clip_seconds: float) -> torch.Tensor:
+    def _load_audio_prompt(self, record: tp.Dict[str, tp.Any]) -> torch.Tensor:
         if not self.include_audio_conditioning:
             return torch.zeros(1, 2, self.audio_prompt_num_samples)
 
@@ -605,7 +605,7 @@ class IFCapsFineTuneDataset(Dataset):
                 return torch.zeros(1, 2, self.audio_prompt_num_samples)
             audio_prompt_path = self._resolve_path(explicit_audio_prompt_value)
         else:
-            audio_prompt_path = self._resolve_path(record.get("audio_path"))
+            return torch.zeros(1, 2, self.audio_prompt_num_samples)
 
         if audio_prompt_path is None:
             return torch.zeros(1, 2, self.audio_prompt_num_samples)
@@ -621,7 +621,7 @@ class IFCapsFineTuneDataset(Dataset):
             audio_tensor = load_and_process_audio(
                 str(audio_prompt_path),
                 self.sample_rate,
-                seconds_start,
+                0,
                 audio_prompt_seconds,
             )
         except Exception as exc:
@@ -669,7 +669,7 @@ class IFCapsFineTuneDataset(Dataset):
                     mixed_variant=variant,
                 ),
                 "video_prompt": self._load_video_prompt(record, seconds_start, video_seconds),
-                "audio_prompt": self._load_audio_prompt(record, seconds_start, clip_seconds),
+                "audio_prompt": self._load_audio_prompt(record),
                 "seconds_start": seconds_start,
                 "seconds_total": seconds_total,
                 "padding_mask": padding_mask,
