@@ -52,6 +52,7 @@ from audiox.models.conditioners import MultiConditioner
 from audiox.models.diffusion import ConditionedDiffusionModelWrapper
 from audiox.training.diffusion import DiffusionCondTrainingWrapper
 from audiox.training.finetune import (
+    EpochLoRACheckpointCallback,
     apply_finetune_defaults,
     apply_trainable_scope,
     build_sample_weights,
@@ -699,6 +700,100 @@ class IFCapsFineTuneTests(unittest.TestCase):
                     resolved_model_config_path=resolved_model_config_path,
                     final_checkpoint_path=None,
                 )
+
+    def test_maybe_upload_huggingface_artifacts_uploads_checkpoint_directory(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmpdir_path = Path(tmpdir)
+            source_config_path = tmpdir_path / "config.json"
+            source_config_path.write_text("{}")
+            resolved_model_config_path = tmpdir_path / "resolved_model_config.json"
+            resolved_model_config_path.write_text("{}")
+            checkpoint_dir = tmpdir_path / "checkpoints"
+            checkpoint_dir.mkdir()
+            (checkpoint_dir / "epoch=1-step=10.pt").write_bytes(b"epoch1")
+            (checkpoint_dir / "last-lora-state.pt").write_bytes(b"last")
+
+            api = mock.Mock()
+            with mock.patch("audiox.training.finetune.HfApi", return_value=api), mock.patch.dict(
+                "os.environ", {"HF_TOKEN": "test-token"}, clear=False
+            ):
+                maybe_upload_huggingface_artifacts(
+                    {
+                        "checkpointing": {"dirpath": str(checkpoint_dir)},
+                        "huggingface": {
+                            "enabled": True,
+                            "repo_id": "owenisas/audiox-mixed-preference-lora-test",
+                            "repo_type": "model",
+                            "private": True,
+                            "path_prefix": "runs/test-run",
+                            "upload_final_checkpoint": False,
+                            "upload_resolved_config": False,
+                            "upload_run_config": False,
+                            "upload_manifest_summary": False,
+                            "upload_checkpoint_dir": True,
+                            "checkpoint_dir_path_in_repo": "checkpoints",
+                        },
+                    },
+                    source_config_path=source_config_path,
+                    resolved_model_config_path=resolved_model_config_path,
+                    final_checkpoint_path=None,
+                )
+
+        uploaded_paths = [call.kwargs["path_in_repo"] for call in api.upload_file.call_args_list]
+        self.assertEqual(
+            uploaded_paths,
+            [
+                "runs/test-run/checkpoints/epoch=1-step=10.pt",
+                "runs/test-run/checkpoints/last-lora-state.pt",
+            ],
+        )
+
+    def test_epoch_lora_checkpoint_callback_saves_and_uploads_epoch_artifact(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmpdir_path = Path(tmpdir)
+            callback = EpochLoRACheckpointCallback(
+                checkpoint_config={
+                    "dirpath": str(tmpdir_path / "checkpoints"),
+                    "filename": "epoch={epoch}-step={step}",
+                    "save_last": True,
+                    "every_n_epochs": 1,
+                    "save_on_train_epoch_end": True,
+                },
+                output_dir=tmpdir_path,
+                run_config={
+                    "lora": {"enabled": True},
+                    "huggingface": {
+                        "enabled": True,
+                        "repo_id": "owenisas/audiox-mixed-preference-lora-test",
+                        "repo_type": "model",
+                        "private": True,
+                        "path_prefix": "runs/test-run",
+                        "upload_checkpoint_dir": True,
+                        "checkpoint_dir_path_in_repo": "checkpoints",
+                    },
+                },
+                lora_info={"enabled": True},
+                trainable_scope_info={"non_lora_parameter_names": []},
+            )
+            trainer = types.SimpleNamespace(current_epoch=0, global_step=12)
+            module = types.SimpleNamespace(diffusion=TinyLoRAModule())
+            api = mock.Mock()
+            with mock.patch("audiox.training.finetune.HfApi", return_value=api), mock.patch.dict(
+                "os.environ", {"HF_TOKEN": "test-token"}, clear=False
+            ):
+                callback.on_train_epoch_end(trainer, module)
+
+            checkpoint_dir = tmpdir_path / "checkpoints"
+            self.assertTrue((checkpoint_dir / "epoch=1-step=12.pt").exists())
+            self.assertTrue((checkpoint_dir / "last-lora-state.pt").exists())
+            uploaded_paths = [call.kwargs["path_in_repo"] for call in api.upload_file.call_args_list]
+            self.assertEqual(
+                uploaded_paths,
+                [
+                    "runs/test-run/checkpoints/epoch=1-step=12.pt",
+                    "runs/test-run/checkpoints/last-lora-state.pt",
+                ],
+            )
 
     def test_dataset_emits_text_video_audio_and_padding_mask(self):
         with tempfile.TemporaryDirectory() as tmpdir:

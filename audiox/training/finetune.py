@@ -9,6 +9,7 @@ from huggingface_hub import HfApi, hf_hub_download
 from pytorch_lightning.callbacks import LearningRateMonitor, ModelCheckpoint
 from pytorch_lightning.loggers import CSVLogger, WandbLogger
 import torch
+from torch import nn
 from torch.utils.data import DataLoader, WeightedRandomSampler
 
 from ..data.ifcaps import IFCapsFineTuneDataset, collate_audiox_batch
@@ -477,7 +478,9 @@ def create_trainer(
 
     callbacks = [LearningRateMonitor(logging_interval="step")]
     checkpoint_enabled = checkpoint_config.get("enabled", True)
-    if checkpoint_enabled:
+    periodic_lora_epochs = int(checkpoint_config.get("every_n_epochs", 0) or 0)
+    use_periodic_lora_checkpoints = checkpoint_enabled and checkpoint_config.get("save_lora_only", False) and periodic_lora_epochs > 0
+    if checkpoint_enabled and not use_periodic_lora_checkpoints:
         checkpoint_kwargs: tp.Dict[str, tp.Any] = {
             "dirpath": checkpoint_config.get("dirpath", str(output_dir / "checkpoints")),
             "filename": checkpoint_config.get("filename", "step={step}"),
@@ -497,9 +500,13 @@ def create_trainer(
             checkpoint_kwargs.update(
                 {
                     "save_top_k": checkpoint_config.get("save_top_k", -1),
-                    "every_n_train_steps": checkpoint_config.get("every_n_train_steps", 1000),
                 }
             )
+            if "every_n_epochs" in checkpoint_config:
+                checkpoint_kwargs["every_n_epochs"] = checkpoint_config["every_n_epochs"]
+                checkpoint_kwargs["save_on_train_epoch_end"] = checkpoint_config.get("save_on_train_epoch_end", True)
+            else:
+                checkpoint_kwargs["every_n_train_steps"] = checkpoint_config.get("every_n_train_steps", 1000)
         callbacks.append(ModelCheckpoint(**checkpoint_kwargs))
 
     loggers: tp.List[tp.Any] = [CSVLogger(save_dir=str(output_dir), name=trainer_config.get("logger_name", "logs"))]
@@ -572,6 +579,117 @@ def _join_repo_path(prefix: str, filename: str) -> str:
     return "/".join(parts)
 
 
+def _build_lora_artifact_payload(
+    training_wrapper: nn.Module,
+    *,
+    global_step: int,
+    epoch: tp.Optional[int],
+    lora_info: tp.Dict[str, tp.Any],
+    lora_config: tp.Optional[tp.Dict[str, tp.Any]],
+    trainable_scope_info: tp.Optional[tp.Dict[str, tp.Any]],
+) -> tp.Dict[str, tp.Any]:
+    trainable_scope_state_dict = {}
+    if trainable_scope_info:
+        trainable_scope_state_dict = extract_parameter_state_dict(
+            training_wrapper.diffusion,
+            trainable_scope_info.get("non_lora_parameter_names", []),
+        )
+    payload = {
+        "global_step": global_step,
+        "lora_info": lora_info,
+        "lora_config": lora_config,
+        "trainable_scope_info": trainable_scope_info,
+        "trainable_scope_state_dict": trainable_scope_state_dict,
+        "lora_state_dict": extract_lora_state_dict(training_wrapper.diffusion),
+    }
+    if epoch is not None:
+        payload["epoch"] = epoch
+    return payload
+
+
+class EpochLoRACheckpointCallback(pl.Callback):
+    def __init__(
+        self,
+        *,
+        checkpoint_config: tp.Dict[str, tp.Any],
+        output_dir: tp.Union[str, Path],
+        run_config: tp.Dict[str, tp.Any],
+        lora_info: tp.Dict[str, tp.Any],
+        trainable_scope_info: tp.Optional[tp.Dict[str, tp.Any]],
+    ) -> None:
+        super().__init__()
+        self.dirpath = Path(checkpoint_config.get("dirpath", Path(output_dir) / "checkpoints"))
+        self.dirpath.mkdir(parents=True, exist_ok=True)
+        self.filename = checkpoint_config.get("filename", "epoch={epoch}-step={step}")
+        self.save_last = checkpoint_config.get("save_last", True)
+        self.every_n_epochs = max(int(checkpoint_config.get("every_n_epochs", 1) or 1), 1)
+        self.save_on_train_epoch_end = checkpoint_config.get("save_on_train_epoch_end", True)
+        self.run_config = run_config
+        self.lora_info = lora_info
+        self.trainable_scope_info = trainable_scope_info
+        self.upload_config = run_config.get("huggingface") or run_config.get("hf_upload") or {}
+        self.upload_enabled = bool(
+            self.upload_config.get("enabled", False) and self.upload_config.get("upload_checkpoint_dir", False)
+        )
+        self.repo_id = self.upload_config.get("repo_id")
+        self.repo_type = self.upload_config.get("repo_type", "model")
+        self.path_prefix = self.upload_config.get("path_prefix", "").strip("/")
+        self.remote_checkpoint_dir = self.upload_config.get("checkpoint_dir_path_in_repo", "checkpoints").strip("/")
+        self.commit_message = self.upload_config.get("commit_message", "Upload AudioX fine-tune artifacts")
+        self._hf_api: tp.Optional[HfApi] = None
+
+    def _format_name(self, trainer: pl.Trainer) -> str:
+        name = self.filename.format(epoch=trainer.current_epoch + 1, step=trainer.global_step)
+        if Path(name).suffix:
+            return name
+        return f"{name}.pt"
+
+    def _upload_checkpoint(self, checkpoint_path: Path) -> None:
+        if not self.upload_enabled or not self.repo_id:
+            return
+        if self._hf_api is None:
+            token = _resolve_hf_token(self.upload_config)
+            self._hf_api = HfApi(token=token)
+            self._hf_api.create_repo(
+                repo_id=self.repo_id,
+                repo_type=self.repo_type,
+                private=self.upload_config.get("private", True),
+                exist_ok=True,
+            )
+        remote_prefix = _join_repo_path(self.path_prefix, self.remote_checkpoint_dir)
+        self._hf_api.upload_file(
+            path_or_fileobj=str(checkpoint_path),
+            path_in_repo=_join_repo_path(remote_prefix, checkpoint_path.name),
+            repo_id=self.repo_id,
+            repo_type=self.repo_type,
+            commit_message=self.commit_message,
+        )
+
+    def on_train_epoch_end(self, trainer: pl.Trainer, pl_module: pl.LightningModule) -> None:
+        if not self.save_on_train_epoch_end:
+            return
+        epoch_number = trainer.current_epoch + 1
+        if epoch_number % self.every_n_epochs != 0:
+            return
+
+        checkpoint_path = self.dirpath / self._format_name(trainer)
+        payload = _build_lora_artifact_payload(
+            pl_module,
+            global_step=trainer.global_step,
+            epoch=epoch_number,
+            lora_info=self.lora_info,
+            lora_config=self.run_config.get("lora"),
+            trainable_scope_info=self.trainable_scope_info,
+        )
+        torch.save(payload, checkpoint_path)
+        self._upload_checkpoint(checkpoint_path)
+
+        if self.save_last:
+            last_path = self.dirpath / "last-lora-state.pt"
+            torch.save(payload, last_path)
+            self._upload_checkpoint(last_path)
+
+
 def maybe_upload_huggingface_artifacts(
     run_config: tp.Dict[str, tp.Any],
     *,
@@ -635,6 +753,35 @@ def maybe_upload_huggingface_artifacts(
             }
         )
 
+    def upload_dir_if_exists(
+        local_dir: tp.Optional[tp.Union[str, Path]],
+        *,
+        enabled: bool,
+        remote_prefix: tp.Optional[str] = None,
+    ) -> None:
+        if not enabled or local_dir is None:
+            return
+        resolved_dir = Path(local_dir)
+        if not resolved_dir.exists() or not resolved_dir.is_dir():
+            return
+        base_prefix = _join_repo_path(path_prefix, remote_prefix or resolved_dir.name)
+        for child in sorted(path for path in resolved_dir.rglob("*") if path.is_file()):
+            relative_path = child.relative_to(resolved_dir).as_posix()
+            path_in_repo = _join_repo_path(base_prefix, relative_path)
+            api.upload_file(
+                path_or_fileobj=str(child),
+                path_in_repo=path_in_repo,
+                repo_id=repo_id,
+                repo_type=repo_type,
+                commit_message=commit_message,
+            )
+            uploaded_files.append(
+                {
+                    "local_path": str(child),
+                    "path_in_repo": path_in_repo,
+                }
+            )
+
     source_config_path = Path(source_config_path)
     manifest_summary_path = source_config_path.parent / "manifest_summary.json"
 
@@ -663,6 +810,11 @@ def maybe_upload_huggingface_artifacts(
         upload_config.get("train_log_path"),
         enabled=upload_config.get("upload_train_log", False),
         remote_name=upload_config.get("train_log_path_in_repo"),
+    )
+    upload_dir_if_exists(
+        upload_config.get("checkpoint_dir") or run_config.get("checkpointing", {}).get("dirpath"),
+        enabled=upload_config.get("upload_checkpoint_dir", False),
+        remote_prefix=upload_config.get("checkpoint_dir_path_in_repo", "checkpoints"),
     )
 
     return {
@@ -705,6 +857,20 @@ def run_finetune(config_path: tp.Union[str, Path]) -> tp.Dict[str, tp.Any]:
         run_config.get("wandb"),
         output_dir,
     )
+    if checkpoint_config.get("enabled", True) and checkpoint_config.get("save_lora_only", False):
+        periodic_lora_epochs = int(checkpoint_config.get("every_n_epochs", 0) or 0)
+        if periodic_lora_epochs > 0:
+            if lora_info is None:
+                raise ValueError("checkpointing.save_lora_only requires LoRA to be enabled.")
+            trainer.callbacks.append(
+                EpochLoRACheckpointCallback(
+                    checkpoint_config=checkpoint_config,
+                    output_dir=output_dir,
+                    run_config=run_config,
+                    lora_info=lora_info,
+                    trainable_scope_info=trainable_scope_info,
+                )
+            )
 
     resume_from_checkpoint = run_config.get("resume_from_checkpoint")
     if val_loader is None:
@@ -725,24 +891,18 @@ def run_finetune(config_path: tp.Union[str, Path]) -> tp.Dict[str, tp.Any]:
         if checkpoint_config.get("save_lora_only", False):
             if lora_info is None:
                 raise ValueError("checkpointing.save_lora_only requires LoRA to be enabled.")
-            trainable_scope_state_dict = {}
-            if trainable_scope_info:
-                trainable_scope_state_dict = extract_parameter_state_dict(
-                    training_wrapper.diffusion,
-                    trainable_scope_info.get("non_lora_parameter_names", []),
-                )
             final_checkpoint_path = final_checkpoint_dir / run_config.get(
                 "final_checkpoint_name", "final-lora-state.pt"
             )
             torch.save(
-                {
-                    "global_step": trainer.global_step,
-                    "lora_info": lora_info,
-                    "lora_config": run_config.get("lora"),
-                    "trainable_scope_info": trainable_scope_info,
-                    "trainable_scope_state_dict": trainable_scope_state_dict,
-                    "lora_state_dict": extract_lora_state_dict(training_wrapper.diffusion),
-                },
+                _build_lora_artifact_payload(
+                    training_wrapper,
+                    global_step=trainer.global_step,
+                    epoch=trainer.current_epoch + 1 if trainer.current_epoch is not None else None,
+                    lora_info=lora_info,
+                    lora_config=run_config.get("lora"),
+                    trainable_scope_info=trainable_scope_info,
+                ),
                 final_checkpoint_path,
             )
         else:
