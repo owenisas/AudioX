@@ -637,6 +637,25 @@ class IFCapsFineTuneTests(unittest.TestCase):
         checkpoint_callbacks = [callback for callback in trainer.callbacks if callback.__class__.__name__ == "ModelCheckpoint"]
         self.assertEqual(checkpoint_callbacks, [])
 
+    def test_create_trainer_adds_resume_checkpoint_callback_for_true_resume(self):
+        trainer = create_trainer(
+            trainer_config={"accelerator": "cpu", "devices": 1, "max_steps": 1},
+            checkpoint_config={
+                "enabled": True,
+                "save_lora_only": True,
+                "save_resume_checkpoints": True,
+                "dirpath": tempfile.mkdtemp(),
+                "filename": "epoch={epoch}-step={step}",
+                "resume_checkpoint_filename": "resume-epoch={epoch}-step={step}",
+                "every_n_epochs": 1,
+            },
+            wandb_config={"enabled": False},
+            output_dir=tempfile.mkdtemp(),
+        )
+        checkpoint_callbacks = [callback for callback in trainer.callbacks if callback.__class__.__name__ == "ModelCheckpoint"]
+        self.assertEqual(len(checkpoint_callbacks), 1)
+        self.assertEqual(checkpoint_callbacks[0].filename, "resume-epoch={epoch}-step={step}")
+
     def test_maybe_upload_huggingface_artifacts_uploads_final_checkpoint_and_configs(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             tmpdir_path = Path(tmpdir)

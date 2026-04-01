@@ -480,12 +480,18 @@ def create_trainer(
     checkpoint_enabled = checkpoint_config.get("enabled", True)
     periodic_lora_epochs = int(checkpoint_config.get("every_n_epochs", 0) or 0)
     use_periodic_lora_checkpoints = checkpoint_enabled and checkpoint_config.get("save_lora_only", False) and periodic_lora_epochs > 0
-    if checkpoint_enabled and not use_periodic_lora_checkpoints:
+    save_resume_checkpoints = checkpoint_enabled and checkpoint_config.get("save_resume_checkpoints", False)
+    if checkpoint_enabled and (not use_periodic_lora_checkpoints or save_resume_checkpoints):
+        checkpoint_filename = checkpoint_config.get("filename", "step={step}")
+        resume_checkpoint_filename = checkpoint_config.get("resume_checkpoint_filename", checkpoint_filename)
         checkpoint_kwargs: tp.Dict[str, tp.Any] = {
-            "dirpath": checkpoint_config.get("dirpath", str(output_dir / "checkpoints")),
-            "filename": checkpoint_config.get("filename", "step={step}"),
+            "dirpath": checkpoint_config.get("resume_checkpoint_dirpath", checkpoint_config.get("dirpath", str(output_dir / "checkpoints"))),
+            "filename": resume_checkpoint_filename if save_resume_checkpoints else checkpoint_filename,
             "save_last": checkpoint_config.get("save_last", True),
-            "save_weights_only": checkpoint_config.get("save_weights_only", False),
+            "save_weights_only": checkpoint_config.get(
+                "resume_save_weights_only" if save_resume_checkpoints else "save_weights_only",
+                False,
+            ),
         }
 
         if checkpoint_config.get("monitor"):
@@ -503,10 +509,16 @@ def create_trainer(
                 }
             )
             if "every_n_epochs" in checkpoint_config:
-                checkpoint_kwargs["every_n_epochs"] = checkpoint_config["every_n_epochs"]
+                checkpoint_kwargs["every_n_epochs"] = checkpoint_config.get(
+                    "resume_every_n_epochs" if save_resume_checkpoints else "every_n_epochs",
+                    checkpoint_config["every_n_epochs"],
+                )
                 checkpoint_kwargs["save_on_train_epoch_end"] = checkpoint_config.get("save_on_train_epoch_end", True)
             else:
-                checkpoint_kwargs["every_n_train_steps"] = checkpoint_config.get("every_n_train_steps", 1000)
+                checkpoint_kwargs["every_n_train_steps"] = checkpoint_config.get(
+                    "resume_every_n_train_steps" if save_resume_checkpoints else "every_n_train_steps",
+                    checkpoint_config.get("every_n_train_steps", 1000),
+                )
         callbacks.append(ModelCheckpoint(**checkpoint_kwargs))
 
     loggers: tp.List[tp.Any] = [CSVLogger(save_dir=str(output_dir), name=trainer_config.get("logger_name", "logs"))]
@@ -884,6 +896,7 @@ def run_finetune(config_path: tp.Union[str, Path]) -> tp.Dict[str, tp.Any]:
         )
 
     final_checkpoint_path = None
+    final_resume_checkpoint_path = None
     save_final_checkpoint = checkpoint_config.get("save_final_checkpoint", checkpoint_config.get("enabled", True))
     if trainer.global_step > 0 and save_final_checkpoint:
         final_checkpoint_dir = Path(checkpoint_config.get("dirpath", output_dir / "checkpoints"))
@@ -905,6 +918,19 @@ def run_finetune(config_path: tp.Union[str, Path]) -> tp.Dict[str, tp.Any]:
                 ),
                 final_checkpoint_path,
             )
+            if checkpoint_config.get("save_resume_checkpoints", False):
+                final_resume_checkpoint_dir = Path(
+                    checkpoint_config.get("resume_checkpoint_dirpath", checkpoint_config.get("dirpath", output_dir / "checkpoints"))
+                )
+                final_resume_checkpoint_dir.mkdir(parents=True, exist_ok=True)
+                final_resume_checkpoint_path = final_resume_checkpoint_dir / checkpoint_config.get(
+                    "final_resume_checkpoint_name",
+                    "final-resume.ckpt",
+                )
+                trainer.save_checkpoint(
+                    str(final_resume_checkpoint_path),
+                    weights_only=checkpoint_config.get("resume_save_weights_only", False),
+                )
         else:
             final_checkpoint_path = final_checkpoint_dir / run_config.get("final_checkpoint_name", "final-step.ckpt")
             trainer.save_checkpoint(
@@ -927,6 +953,7 @@ def run_finetune(config_path: tp.Union[str, Path]) -> tp.Dict[str, tp.Any]:
         "output_dir": str(output_dir),
         "resolved_model_config_path": str(resolved_config_path),
         "final_checkpoint_path": str(final_checkpoint_path) if final_checkpoint_path else None,
+        "final_resume_checkpoint_path": str(final_resume_checkpoint_path) if final_resume_checkpoint_path else None,
         "huggingface_upload_info": huggingface_upload_info,
         "trainer": trainer,
         "training_wrapper": training_wrapper,

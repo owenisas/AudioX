@@ -57,6 +57,9 @@
     "every_n_train_steps": 500,
     "save_final_checkpoint": true,
     "save_lora_only": true,
+    "save_resume_checkpoints": true,
+    "resume_checkpoint_filename": "resume-step={step}",
+    "final_resume_checkpoint_name": "final-resume.ckpt",
     "final_checkpoint_name": "final-lora-state.pt"
   },
   "lora": {
