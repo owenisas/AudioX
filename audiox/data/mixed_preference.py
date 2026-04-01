@@ -109,6 +109,15 @@ def _resolve_source_path(value: tp.Any, base_dir: Path) -> tp.Optional[Path]:
         path = (base_dir / path).resolve()
     else:
         path = path.resolve()
+        if not path.exists():
+            for anchor in ("audio", "ifcaps", "sound_effects"):
+                if anchor not in path.parts:
+                    continue
+                anchor_index = path.parts.index(anchor)
+                remapped_path = (base_dir / Path(*path.parts[anchor_index:])).resolve()
+                if remapped_path.exists():
+                    path = remapped_path
+                    break
     return path
 
 

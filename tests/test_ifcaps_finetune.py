@@ -1101,6 +1101,43 @@ class IFCapsFineTuneTests(unittest.TestCase):
             self.assertEqual(sound_effect_row["sample_type"], "standalone")
             self.assertIn("coyotes howling in the jungle felix blume", sound_effect_row["text_prompt"])
 
+    def test_prepare_mixed_preference_manifests_remaps_missing_absolute_source_paths_to_dataset_root(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            dataset_root = Path(tmpdir) / "dataset"
+            audio_dir = dataset_root / "audio" / "audio_targets"
+            manifest_dir = dataset_root / "audio"
+            audio_dir.mkdir(parents=True)
+            manifest_dir.mkdir(parents=True, exist_ok=True)
+
+            _write_wav(audio_dir / "asmr_0000.wav", sample_rate=16000)
+            fake_local_root = Path("/Users/user/PycharmProjects/Scraper/test_runs/hf_collection_20260330")
+            records = [
+                {
+                    "clip_id": "asmr_0000",
+                    "clip_index": 0,
+                    "sample_group_id": "group-asmr",
+                    "audio_path": str(fake_local_root / "audio" / "audio_targets" / "asmr_0000.wav"),
+                    "tagged_training_caption": "[asmr]: zero",
+                    "source_family": "asmr",
+                    "preference_tags": ["asmr"],
+                    "start_s": 0.0,
+                    "end_s": 10.0,
+                    "split": "train",
+                },
+            ]
+            manifest_path = manifest_dir / "audio_manifest_split.jsonl"
+            with manifest_path.open("w") as handle:
+                for record in records:
+                    handle.write(json.dumps(record) + "\n")
+
+            output_dir = Path(tmpdir) / "prepared"
+            summary = prepare_mixed_preference_manifests(dataset_root, output_dir)
+
+            with Path(summary["train_manifest_path"]).open() as handle:
+                train_rows = [json.loads(line) for line in handle]
+            self.assertEqual(len(train_rows), 1)
+            self.assertEqual(train_rows[0]["audio_path"], str((audio_dir / "asmr_0000.wav").resolve()))
+
     def test_mixed_preference_manifest_smoke_dataset_shapes_with_video_enabled(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             dataset_root = Path(tmpdir) / "dataset"
