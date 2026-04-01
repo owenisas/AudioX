@@ -1,5 +1,7 @@
 import json
 import math
+import shutil
+import subprocess
 import tempfile
 import types
 import unittest
@@ -24,6 +26,7 @@ from audiox.data.mixed_preference import (
 )
 from audiox.data.ifcaps import (
     IFCapsFineTuneDataset,
+    _load_audio_waveform,
     _load_wav_with_wave,
     build_text_prompt,
     normalize_training_metadata,
@@ -200,6 +203,27 @@ class IFCapsFineTuneTests(unittest.TestCase):
         self.assertEqual(tuple(waveform.shape), (2, 2))
         self.assertTrue(torch.allclose(waveform[0], torch.tensor([0.0, 2.0 / 32768.0])))
         self.assertTrue(torch.allclose(waveform[1], torch.tensor([1.0 / 32768.0, 3.0 / 32768.0])))
+
+    def test_load_audio_waveform_uses_ffmpeg_for_mp3_when_torchaudio_is_unavailable(self):
+        ffmpeg = shutil.which("ffmpeg")
+        if not ffmpeg:
+            self.skipTest("ffmpeg is not installed")
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmpdir_path = Path(tmpdir)
+            wav_path = tmpdir_path / "source.wav"
+            mp3_path = tmpdir_path / "source.mp3"
+            _write_wav(wav_path, sample_rate=16000)
+            subprocess.run(
+                [ffmpeg, "-nostdin", "-v", "error", "-y", "-i", str(wav_path), str(mp3_path)],
+                check=True,
+            )
+
+            with mock.patch.dict("sys.modules", {"torchaudio": None}):
+                waveform = _load_audio_waveform(mp3_path, 16000)
+
+        self.assertEqual(waveform.shape[0], 2)
+        self.assertGreater(waveform.shape[-1], 0)
 
     def test_multi_conditioner_falls_back_to_legacy_prompt_key(self):
         recorder = RecorderConditioner()

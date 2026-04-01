@@ -1,6 +1,8 @@
 import json
 import math
 import random
+import shutil
+import subprocess
 import typing as tp
 import warnings
 import wave
@@ -423,12 +425,51 @@ def _load_wav_with_wave(audio_path: Path) -> tp.Tuple[torch.Tensor, int]:
 
 
 def _load_audio_waveform(audio_path: Path, target_sample_rate: int) -> torch.Tensor:
+    def _load_with_ffmpeg() -> torch.Tensor:
+        ffmpeg = shutil.which("ffmpeg")
+        if not ffmpeg:
+            raise RuntimeError("ffmpeg is not installed")
+        process = subprocess.run(
+            [
+                ffmpeg,
+                "-nostdin",
+                "-v",
+                "error",
+                "-i",
+                str(audio_path),
+                "-f",
+                "s16le",
+                "-acodec",
+                "pcm_s16le",
+                "-ac",
+                "2",
+                "-ar",
+                str(target_sample_rate),
+                "-",
+            ],
+            check=False,
+            capture_output=True,
+        )
+        if process.returncode != 0:
+            stderr = process.stderr.decode("utf-8", errors="ignore").strip()
+            raise RuntimeError(stderr or f"ffmpeg failed for {audio_path}")
+        waveform = torch.frombuffer(bytearray(process.stdout), dtype=torch.int16).to(torch.float32)
+        if waveform.numel() < 2:
+            raise RuntimeError(f"ffmpeg produced no audio samples for {audio_path}")
+        remainder = waveform.numel() % 2
+        if remainder:
+            waveform = waveform[:-remainder]
+        return waveform.view(-1, 2).t().contiguous() / 32768.0
+
     try:
         import torchaudio
 
         waveform, sample_rate = torchaudio.load(str(audio_path))
     except Exception:
-        waveform, sample_rate = _load_wav_with_wave(audio_path)
+        try:
+            waveform, sample_rate = _load_wav_with_wave(audio_path)
+        except Exception:
+            return _load_with_ffmpeg()
 
     if sample_rate != target_sample_rate:
         waveform = _resample_audio(waveform, sample_rate, target_sample_rate)
