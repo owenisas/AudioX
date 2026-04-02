@@ -2,6 +2,7 @@ import copy
 import json
 import os
 import typing as tp
+import warnings
 from pathlib import Path
 
 import pytorch_lightning as pl
@@ -663,23 +664,30 @@ class EpochLoRACheckpointCallback(pl.Callback):
     def _upload_checkpoint(self, checkpoint_path: Path) -> None:
         if not self.upload_enabled or not self.repo_id:
             return
-        if self._hf_api is None:
-            token = _resolve_hf_token(self.upload_config)
-            self._hf_api = HfApi(token=token)
-            self._hf_api.create_repo(
+        try:
+            if self._hf_api is None:
+                token = _resolve_hf_token(self.upload_config)
+                self._hf_api = HfApi(token=token)
+                self._hf_api.create_repo(
+                    repo_id=self.repo_id,
+                    repo_type=self.repo_type,
+                    private=self.upload_config.get("private", True),
+                    exist_ok=True,
+                )
+            remote_prefix = _join_repo_path(self.path_prefix, self.remote_checkpoint_dir)
+            self._hf_api.upload_file(
+                path_or_fileobj=str(checkpoint_path),
+                path_in_repo=_join_repo_path(remote_prefix, checkpoint_path.name),
                 repo_id=self.repo_id,
                 repo_type=self.repo_type,
-                private=self.upload_config.get("private", True),
-                exist_ok=True,
+                commit_message=self.commit_message,
             )
-        remote_prefix = _join_repo_path(self.path_prefix, self.remote_checkpoint_dir)
-        self._hf_api.upload_file(
-            path_or_fileobj=str(checkpoint_path),
-            path_in_repo=_join_repo_path(remote_prefix, checkpoint_path.name),
-            repo_id=self.repo_id,
-            repo_type=self.repo_type,
-            commit_message=self.commit_message,
-        )
+        except Exception as exc:
+            warnings.warn(
+                f"Failed to upload checkpoint to Hugging Face: {checkpoint_path} ({exc}). "
+                "Keeping local checkpoint and continuing training.",
+                RuntimeWarning,
+            )
 
     def _upload_resume_checkpoints_for_epoch(self, epoch_number: int) -> None:
         if not self.upload_enabled or not self.repo_id:
@@ -744,9 +752,24 @@ def maybe_upload_huggingface_artifacts(
     path_prefix = upload_config.get("path_prefix", "").strip("/")
     commit_message = upload_config.get("commit_message", "Upload AudioX fine-tune artifacts")
     api = HfApi(token=token)
-    api.create_repo(repo_id=repo_id, repo_type=repo_type, private=private, exist_ok=True)
+    try:
+        api.create_repo(repo_id=repo_id, repo_type=repo_type, private=private, exist_ok=True)
+    except Exception as exc:
+        warnings.warn(
+            f"Failed to create or verify Hugging Face repo {repo_id}: {exc}. "
+            "Skipping remote uploads and keeping local artifacts.",
+            RuntimeWarning,
+        )
+        return {
+            "repo_id": repo_id,
+            "repo_type": repo_type,
+            "repo_url": f"https://huggingface.co/{repo_id}",
+            "uploaded_files": [],
+            "upload_errors": [{"path_in_repo": "", "error": str(exc)}],
+        }
 
     uploaded_files: tp.List[tp.Dict[str, str]] = []
+    upload_errors: tp.List[tp.Dict[str, str]] = []
 
     def upload_if_exists(
         local_path: tp.Optional[tp.Union[str, Path]],
@@ -772,19 +795,33 @@ def maybe_upload_huggingface_artifacts(
             return
 
         path_in_repo = _join_repo_path(path_prefix, remote_name or resolved_path.name)
-        api.upload_file(
-            path_or_fileobj=str(resolved_path),
-            path_in_repo=path_in_repo,
-            repo_id=repo_id,
-            repo_type=repo_type,
-            commit_message=commit_message,
-        )
-        uploaded_files.append(
-            {
-                "local_path": str(resolved_path),
-                "path_in_repo": path_in_repo,
-            }
-        )
+        try:
+            api.upload_file(
+                path_or_fileobj=str(resolved_path),
+                path_in_repo=path_in_repo,
+                repo_id=repo_id,
+                repo_type=repo_type,
+                commit_message=commit_message,
+            )
+            uploaded_files.append(
+                {
+                    "local_path": str(resolved_path),
+                    "path_in_repo": path_in_repo,
+                }
+            )
+        except Exception as exc:
+            upload_errors.append(
+                {
+                    "local_path": str(resolved_path),
+                    "path_in_repo": path_in_repo,
+                    "error": str(exc),
+                }
+            )
+            warnings.warn(
+                f"Failed to upload artifact to Hugging Face: {resolved_path} -> {path_in_repo} ({exc}). "
+                "Keeping local artifact and continuing.",
+                RuntimeWarning,
+            )
 
     def upload_dir_if_exists(
         local_dir: tp.Optional[tp.Union[str, Path]],
@@ -801,19 +838,33 @@ def maybe_upload_huggingface_artifacts(
         for child in sorted(path for path in resolved_dir.rglob("*") if path.is_file()):
             relative_path = child.relative_to(resolved_dir).as_posix()
             path_in_repo = _join_repo_path(base_prefix, relative_path)
-            api.upload_file(
-                path_or_fileobj=str(child),
-                path_in_repo=path_in_repo,
-                repo_id=repo_id,
-                repo_type=repo_type,
-                commit_message=commit_message,
-            )
-            uploaded_files.append(
-                {
-                    "local_path": str(child),
-                    "path_in_repo": path_in_repo,
-                }
-            )
+            try:
+                api.upload_file(
+                    path_or_fileobj=str(child),
+                    path_in_repo=path_in_repo,
+                    repo_id=repo_id,
+                    repo_type=repo_type,
+                    commit_message=commit_message,
+                )
+                uploaded_files.append(
+                    {
+                        "local_path": str(child),
+                        "path_in_repo": path_in_repo,
+                    }
+                )
+            except Exception as exc:
+                upload_errors.append(
+                    {
+                        "local_path": str(child),
+                        "path_in_repo": path_in_repo,
+                        "error": str(exc),
+                    }
+                )
+                warnings.warn(
+                    f"Failed to upload artifact to Hugging Face: {child} -> {path_in_repo} ({exc}). "
+                    "Keeping local artifact and continuing.",
+                    RuntimeWarning,
+                )
 
     source_config_path = Path(source_config_path)
     manifest_summary_path = source_config_path.parent / "manifest_summary.json"
@@ -855,6 +906,7 @@ def maybe_upload_huggingface_artifacts(
         "repo_type": repo_type,
         "repo_url": f"https://huggingface.co/{repo_id}",
         "uploaded_files": uploaded_files,
+        "upload_errors": upload_errors,
     }
 
 
