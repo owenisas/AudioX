@@ -632,6 +632,10 @@ class EpochLoRACheckpointCallback(pl.Callback):
         super().__init__()
         self.dirpath = Path(checkpoint_config.get("dirpath", Path(output_dir) / "checkpoints"))
         self.dirpath.mkdir(parents=True, exist_ok=True)
+        self.resume_dirpath = Path(
+            checkpoint_config.get("resume_checkpoint_dirpath", checkpoint_config.get("dirpath", Path(output_dir) / "checkpoints"))
+        )
+        self.resume_dirpath.mkdir(parents=True, exist_ok=True)
         self.filename = checkpoint_config.get("filename", "epoch={epoch}-step={step}")
         self.save_last = checkpoint_config.get("save_last", True)
         self.every_n_epochs = max(int(checkpoint_config.get("every_n_epochs", 1) or 1), 1)
@@ -677,6 +681,21 @@ class EpochLoRACheckpointCallback(pl.Callback):
             commit_message=self.commit_message,
         )
 
+    def _upload_resume_checkpoints_for_epoch(self, epoch_number: int) -> None:
+        if not self.upload_enabled or not self.repo_id:
+            return
+
+        uploaded_paths: tp.Set[Path] = set()
+        for checkpoint_dir in {self.dirpath, self.resume_dirpath}:
+            if not checkpoint_dir.exists():
+                continue
+            for child in sorted(checkpoint_dir.glob("*.ckpt")):
+                if f"epoch={epoch_number}" in child.name or child.name == "last.ckpt":
+                    if child in uploaded_paths:
+                        continue
+                    self._upload_checkpoint(child)
+                    uploaded_paths.add(child)
+
     def on_train_epoch_end(self, trainer: pl.Trainer, pl_module: pl.LightningModule) -> None:
         if not self.save_on_train_epoch_end:
             return
@@ -700,6 +719,8 @@ class EpochLoRACheckpointCallback(pl.Callback):
             last_path = self.dirpath / "last-lora-state.pt"
             torch.save(payload, last_path)
             self._upload_checkpoint(last_path)
+
+        self._upload_resume_checkpoints_for_epoch(epoch_number)
 
 
 def maybe_upload_huggingface_artifacts(

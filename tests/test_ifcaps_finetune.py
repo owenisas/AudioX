@@ -773,6 +773,7 @@ class IFCapsFineTuneTests(unittest.TestCase):
             callback = EpochLoRACheckpointCallback(
                 checkpoint_config={
                     "dirpath": str(tmpdir_path / "checkpoints"),
+                    "resume_checkpoint_dirpath": str(tmpdir_path / "checkpoints"),
                     "filename": "epoch={epoch}-step={step}",
                     "save_last": True,
                     "every_n_epochs": 1,
@@ -796,6 +797,8 @@ class IFCapsFineTuneTests(unittest.TestCase):
             )
             trainer = types.SimpleNamespace(current_epoch=0, global_step=12)
             module = types.SimpleNamespace(diffusion=TinyLoRAModule())
+            (tmpdir_path / "checkpoints").mkdir(parents=True, exist_ok=True)
+            (tmpdir_path / "checkpoints" / "resume-epoch=1-step=12.ckpt").write_bytes(b"resume")
             api = mock.Mock()
             with mock.patch("audiox.training.finetune.HfApi", return_value=api), mock.patch.dict(
                 "os.environ", {"HF_TOKEN": "test-token"}, clear=False
@@ -811,6 +814,7 @@ class IFCapsFineTuneTests(unittest.TestCase):
                 [
                     "runs/test-run/checkpoints/epoch=1-step=12.pt",
                     "runs/test-run/checkpoints/last-lora-state.pt",
+                    "runs/test-run/checkpoints/resume-epoch=1-step=12.ckpt",
                 ],
             )
 
@@ -973,14 +977,18 @@ class IFCapsFineTuneTests(unittest.TestCase):
             media_root = Path(tmpdir) / "remote"
             audio_dir = dataset_root / "audio" / "audio_targets"
             video_dir = dataset_root / "ifcaps" / "clips"
+            screenshot_dir = dataset_root / "ifcaps" / "screenshots"
             audio_dir.mkdir(parents=True)
             video_dir.mkdir(parents=True)
+            screenshot_dir.mkdir(parents=True)
 
             _write_wav(audio_dir / "clip_0000.wav", sample_rate=16000)
             _write_wav(audio_dir / "clip_0001.wav", sample_rate=16000)
             _write_wav(audio_dir / "clip_0004.wav", sample_rate=16000)
             (video_dir / "clip_0000.mp4").touch()
             (video_dir / "clip_0001.mp4").touch()
+            (screenshot_dir / "clip_0000.jpg").touch()
+            (screenshot_dir / "clip_0001.jpg").touch()
 
             records = [
                 {
@@ -1046,12 +1054,136 @@ class IFCapsFineTuneTests(unittest.TestCase):
             self.assertEqual(rows[0]["text_prompt"], "[asmr]: zero")
             self.assertTrue(rows[0]["audio_path"].startswith(str(media_root)))
             self.assertTrue(rows[0]["video_path"].startswith(str(media_root)))
+            self.assertTrue(rows[0]["screenshot_path"].startswith(str(media_root)))
             self.assertEqual(rows[-1]["text_prompt"], "plain four")
             self.assertNotIn("video_path", rows[-1])
+            self.assertNotIn("screenshot_path", rows[-1])
             self.assertEqual(
                 rows[1]["text_prompt_candidates"],
                 ["[asmr]: one", "plain one", "[asmr]: one alt", "plain one alt", "timeline one"],
             )
+
+    def test_dataset_composes_screenshot_into_first_visual_frame(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmpdir_path = Path(tmpdir)
+            audio_path = tmpdir_path / "sample.wav"
+            video_path = tmpdir_path / "sample.mp4"
+            screenshot_path = tmpdir_path / "sample.jpg"
+            _write_wav(audio_path, sample_rate=16000)
+            video_path.touch()
+            screenshot_path.touch()
+            manifest_path = tmpdir_path / "train.jsonl"
+            manifest_path.write_text(
+                json.dumps(
+                    {
+                        "audio_path": str(audio_path),
+                        "video_path": str(video_path),
+                        "screenshot_path": str(screenshot_path),
+                        "caption": "Bell ring",
+                    }
+                )
+                + "\n"
+            )
+
+            dataset = IFCapsFineTuneDataset(
+                manifest_path=manifest_path,
+                sample_rate=16000,
+                sample_size=8000,
+                prompt_format="natural",
+                include_video_conditioning=True,
+                include_audio_conditioning=False,
+                video_fps=2,
+            )
+
+            clip_frames = torch.full((1, 3, 224, 224), 2.0)
+            screenshot_frame = torch.full((1, 3, 224, 224), 7.0)
+
+            def fake_read_video(path, seek_time=0.0, duration=-1, target_fps=2):
+                if path.endswith(".jpg"):
+                    return screenshot_frame.clone()
+                return clip_frames.repeat(max(1, int(round(duration * target_fps))), 1, 1, 1)
+
+            with mock.patch("audiox.data.ifcaps.read_video", side_effect=fake_read_video):
+                _, metadata = dataset[0]
+
+            video_tensors = metadata["video_prompt"]["video_tensors"]
+            self.assertEqual(video_tensors.shape, (1, 10, 3, 224, 224))
+            self.assertTrue(torch.all(video_tensors[0, 0] == 7.0))
+            self.assertTrue(torch.all(video_tensors[0, 1:] == 2.0))
+
+    def test_dataset_uses_screenshot_only_when_clip_is_missing(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmpdir_path = Path(tmpdir)
+            audio_path = tmpdir_path / "sample.wav"
+            screenshot_path = tmpdir_path / "sample.jpg"
+            _write_wav(audio_path, sample_rate=16000)
+            screenshot_path.touch()
+            manifest_path = tmpdir_path / "train.jsonl"
+            manifest_path.write_text(
+                json.dumps(
+                    {
+                        "audio_path": str(audio_path),
+                        "screenshot_path": str(screenshot_path),
+                        "caption": "Bell ring",
+                    }
+                )
+                + "\n"
+            )
+
+            dataset = IFCapsFineTuneDataset(
+                manifest_path=manifest_path,
+                sample_rate=16000,
+                sample_size=8000,
+                prompt_format="natural",
+                include_video_conditioning=True,
+                include_audio_conditioning=False,
+                video_fps=2,
+            )
+
+            screenshot_frame = torch.full((1, 3, 224, 224), 5.0)
+            with mock.patch("audiox.data.ifcaps.read_video", return_value=screenshot_frame.clone()):
+                _, metadata = dataset[0]
+
+            video_tensors = metadata["video_prompt"]["video_tensors"]
+            self.assertEqual(video_tensors.shape, (1, 10, 3, 224, 224))
+            self.assertTrue(torch.all(video_tensors == 5.0))
+
+    def test_dataset_uses_clip_only_when_screenshot_is_missing(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmpdir_path = Path(tmpdir)
+            audio_path = tmpdir_path / "sample.wav"
+            video_path = tmpdir_path / "sample.mp4"
+            _write_wav(audio_path, sample_rate=16000)
+            video_path.touch()
+            manifest_path = tmpdir_path / "train.jsonl"
+            manifest_path.write_text(
+                json.dumps(
+                    {
+                        "audio_path": str(audio_path),
+                        "video_path": str(video_path),
+                        "caption": "Bell ring",
+                    }
+                )
+                + "\n"
+            )
+
+            dataset = IFCapsFineTuneDataset(
+                manifest_path=manifest_path,
+                sample_rate=16000,
+                sample_size=8000,
+                prompt_format="natural",
+                include_video_conditioning=True,
+                include_audio_conditioning=False,
+                video_fps=2,
+            )
+
+            clip_frames = torch.full((10, 3, 224, 224), 3.0)
+            with mock.patch("audiox.data.ifcaps.read_video", return_value=clip_frames.clone()):
+                _, metadata = dataset[0]
+
+            video_tensors = metadata["video_prompt"]["video_tensors"]
+            self.assertEqual(video_tensors.shape, (1, 10, 3, 224, 224))
+            self.assertTrue(torch.all(video_tensors == 3.0))
 
     def test_collect_text_prompt_candidates_prefers_requested_caption_and_deduplicates_alternates(self):
         record = {

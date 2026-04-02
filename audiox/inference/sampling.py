@@ -181,7 +181,10 @@ def sample_k(
         x = noise
     # x = noise
 
-    with torch.cuda.amp.autocast():
+    # The default CUDA autocast path can produce all-NaN outputs for AudioX
+    # checkpoints at inference time. Keep sampling in full precision and let
+    # callers reintroduce mixed precision only after validating stability.
+    with torch.cuda.amp.autocast(enabled=False):
         if sampler_type == "k-heun":
             return K.sampling.sample_heun(denoiser, x, sigmas, disable=False, callback=wrapped_callback, extra_args=extra_args)
         elif sampler_type == "k-lms":

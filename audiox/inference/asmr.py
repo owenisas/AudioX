@@ -3,6 +3,7 @@ import re
 import typing as tp
 from pathlib import Path
 
+import numpy as np
 import torch
 
 from .generation import generate_diffusion_cond
@@ -66,11 +67,13 @@ def build_zero_video_prompt(
     *,
     seconds_total: float,
     video_fps: int,
+    frame_count: tp.Optional[int] = None,
     device: tp.Union[str, torch.device] = "cpu",
 ) -> tp.Dict[str, torch.Tensor]:
-    frame_count = max(1, int(round(seconds_total * video_fps)))
+    resolved_frame_count = frame_count if frame_count is not None else int(round(seconds_total * video_fps))
+    resolved_frame_count = max(1, resolved_frame_count)
     return {
-        "video_tensors": torch.zeros(1, frame_count, 3, 224, 224, device=device),
+        "video_tensors": torch.zeros(1, resolved_frame_count, 3, 224, 224, device=device),
         "video_sync_frames": torch.zeros(1, 240, 768, device=device),
     }
 
@@ -94,6 +97,21 @@ def prepare_audio_prompt(
     return prepared
 
 
+def infer_zero_video_frame_count(model: tp.Any, *, sample_rate: int, sample_size: int, video_fps: int) -> int:
+    default_frame_count = max(1, int(round(sample_size / sample_rate * video_fps)))
+    conditioners = getattr(getattr(model, "conditioner", None), "conditioners", None)
+    conditioner = None
+    if conditioners is not None and "video_prompt" in conditioners:
+        conditioner = conditioners["video_prompt"]
+    in_features = getattr(conditioner, "in_features", None)
+    if in_features is None:
+        return default_frame_count
+    if in_features % 50 != 0:
+        return default_frame_count
+    inferred_frame_count = int(in_features // 50)
+    return max(1, inferred_frame_count)
+
+
 def build_continuation_conditioning(
     text_prompt: str,
     *,
@@ -102,6 +120,7 @@ def build_continuation_conditioning(
     video_fps: int,
     audio_prompt_num_samples: int,
     previous_audio: tp.Optional[torch.Tensor] = None,
+    zero_video_frame_count: tp.Optional[int] = None,
     device: tp.Union[str, torch.device] = "cpu",
 ) -> tp.List[tp.Dict[str, tp.Any]]:
     seconds_total = sample_size / sample_rate
@@ -116,6 +135,7 @@ def build_continuation_conditioning(
             "video_prompt": build_zero_video_prompt(
                 seconds_total=seconds_total,
                 video_fps=video_fps,
+                frame_count=zero_video_frame_count,
                 device=device,
             ),
             "seconds_start": 0,
@@ -131,6 +151,7 @@ def build_standalone_conditioning(
     sample_size: int,
     video_fps: int,
     audio_prompt_num_samples: int,
+    zero_video_frame_count: tp.Optional[int] = None,
     device: tp.Union[str, torch.device] = "cpu",
 ) -> tp.List[tp.Dict[str, tp.Any]]:
     return build_continuation_conditioning(
@@ -140,6 +161,7 @@ def build_standalone_conditioning(
         video_fps=video_fps,
         audio_prompt_num_samples=audio_prompt_num_samples,
         previous_audio=None,
+        zero_video_frame_count=zero_video_frame_count,
         device=device,
     )
 
@@ -197,6 +219,12 @@ def run_asmr_continuation(
     sample_size = model_config["sample_size"]
     video_fps = model_config.get("video_fps", 5)
     audio_prompt_num_samples = extract_audio_prompt_num_samples(model_config, sample_size)
+    zero_video_frame_count = infer_zero_video_frame_count(
+        model,
+        sample_rate=sample_rate,
+        sample_size=sample_size,
+        video_fps=video_fps,
+    )
     overlap_samples = int(round(crossfade_overlap_seconds * sample_rate))
 
     output_dir = Path(output_dir)
@@ -208,8 +236,6 @@ def run_asmr_continuation(
     generated_chunks = []
     previous_audio = None
 
-    import torchaudio
-
     for index, text_prompt in enumerate(prompts):
         chunk_seed = seed + index if seed >= 0 else -1
         conditioning = build_continuation_conditioning(
@@ -219,6 +245,7 @@ def run_asmr_continuation(
             video_fps=video_fps,
             audio_prompt_num_samples=audio_prompt_num_samples,
             previous_audio=previous_audio,
+            zero_video_frame_count=zero_video_frame_count,
             device=resolved_device,
         )
         generated = generate_diffusion_cond(
@@ -237,13 +264,13 @@ def run_asmr_continuation(
         generated_chunks.append(generated)
 
         chunk_path = chunk_dir / f"chunk_{index:03d}.wav"
-        torchaudio.save(str(chunk_path), generated.squeeze(0).to(torch.float32), sample_rate)
+        save_wav_file(chunk_path, generated.squeeze(0), sample_rate)
         chunk_paths.append(str(chunk_path))
         chunk_seeds.append(chunk_seed)
 
     stitched = crossfade_stitch(generated_chunks, overlap_samples=overlap_samples).to(torch.float32)
     stitched_path = output_dir / "stitched.wav"
-    torchaudio.save(str(stitched_path), stitched, sample_rate)
+    save_wav_file(stitched_path, stitched, sample_rate)
 
     sidecar_path = output_dir / "run.json"
     sidecar = {
@@ -278,6 +305,37 @@ def _sanitize_clip_id(value: str, index: int) -> str:
     return f"prompt_{index:03d}"
 
 
+def save_wav_file(path: tp.Union[str, Path], audio: torch.Tensor, sample_rate: int) -> None:
+    path = Path(path)
+    waveform = audio.detach().cpu().to(torch.float32)
+    if waveform.ndim == 3:
+        waveform = waveform.squeeze(0)
+    if waveform.ndim == 1:
+        waveform = waveform.unsqueeze(0)
+
+    try:
+        import torchaudio
+
+        torchaudio.save(str(path), waveform, sample_rate)
+        return
+    except Exception:
+        pass
+
+    try:
+        import soundfile as sf
+
+        sf.write(str(path), waveform.transpose(0, 1).numpy(), sample_rate)
+        return
+    except Exception:
+        pass
+
+    from scipy.io import wavfile
+
+    clipped = waveform.clamp(-1.0, 1.0).transpose(0, 1).numpy()
+    pcm16 = np.int16(clipped * 32767.0)
+    wavfile.write(str(path), sample_rate, pcm16)
+
+
 def run_soundfx_eval_batch(
     prompt_manifest: tp.Union[str, Path],
     *,
@@ -305,6 +363,12 @@ def run_soundfx_eval_batch(
     sample_size = model_config["sample_size"]
     video_fps = model_config.get("video_fps", 5)
     audio_prompt_num_samples = extract_audio_prompt_num_samples(model_config, sample_size)
+    zero_video_frame_count = infer_zero_video_frame_count(
+        model,
+        sample_rate=sample_rate,
+        sample_size=sample_size,
+        video_fps=video_fps,
+    )
 
     output_dir = Path(output_dir)
     wav_dir = output_dir / "wavs"
@@ -335,8 +399,6 @@ def run_soundfx_eval_batch(
         )
     )
 
-    import torchaudio
-
     output_rows: tp.List[tp.Dict[str, tp.Any]] = []
     with outputs_path.open("w") as handle:
         for index, record in enumerate(records):
@@ -348,6 +410,7 @@ def run_soundfx_eval_batch(
                 sample_size=sample_size,
                 video_fps=video_fps,
                 audio_prompt_num_samples=audio_prompt_num_samples,
+                zero_video_frame_count=zero_video_frame_count,
                 device=resolved_device,
             )
             generated = generate_diffusion_cond(
@@ -364,7 +427,7 @@ def run_soundfx_eval_batch(
             ).detach().cpu()
 
             wav_path = wav_dir / f"{clip_id}.wav"
-            torchaudio.save(str(wav_path), generated.squeeze(0).to(torch.float32), sample_rate)
+            save_wav_file(wav_path, generated.squeeze(0), sample_rate)
 
             output_row = {
                 "clip_id": clip_id,

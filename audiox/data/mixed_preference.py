@@ -136,6 +136,23 @@ def _rewrite_media_path(
     return str(media_root / relative_path)
 
 
+def _resolve_screenshot_source_path(record: tp.Dict[str, tp.Any], dataset_root: Path) -> tp.Optional[Path]:
+    explicit_screenshot_path = _resolve_source_path(record.get("screenshot_path"), dataset_root)
+    if explicit_screenshot_path is not None and explicit_screenshot_path.exists():
+        return explicit_screenshot_path
+
+    clip_id = _first_nonempty(record.get("clip_id"))
+    if not clip_id:
+        return None
+
+    screenshots_root = dataset_root / "ifcaps" / "screenshots"
+    for suffix in (".jpg", ".jpeg", ".png", ".webp"):
+        screenshot_path = screenshots_root / f"{clip_id}{suffix}"
+        if screenshot_path.exists():
+            return screenshot_path.resolve()
+    return None
+
+
 def _rewrite_sound_effect_path(
     source_path: Path,
     *,
@@ -407,6 +424,13 @@ def build_mixed_preference_manifest_rows(
             if include_video and video_source_path is not None and video_source_path.exists():
                 output_row["video_path"] = _rewrite_media_path(
                     video_source_path,
+                    dataset_root=dataset_root,
+                    media_root=media_root_path,
+                )
+            screenshot_source_path = _resolve_screenshot_source_path(row, dataset_root)
+            if include_video and screenshot_source_path is not None and screenshot_source_path.exists():
+                output_row["screenshot_path"] = _rewrite_media_path(
+                    screenshot_source_path,
                     dataset_root=dataset_root,
                     media_root=media_root_path,
                 )

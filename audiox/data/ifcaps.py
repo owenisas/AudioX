@@ -563,6 +563,60 @@ class IFCapsFineTuneDataset(Dataset):
             "video_sync_frames": torch.zeros(1, 240, 768),
         }
 
+    def _resolve_target_video_frame_count(self, clip_seconds: float) -> int:
+        return max(1, int(round(clip_seconds * self.video_fps)))
+
+    def _load_visual_frames(
+        self,
+        record: tp.Dict[str, tp.Any],
+        *,
+        seconds_start: int,
+        clip_seconds: float,
+    ) -> tp.Optional[torch.Tensor]:
+        frame_count = self._resolve_target_video_frame_count(clip_seconds)
+        video_path = self._resolve_path(record.get("video_path") or record.get("video"))
+        screenshot_path = self._resolve_path(record.get("screenshot_path"))
+
+        clip_frames: tp.Optional[torch.Tensor] = None
+        if video_path is not None:
+            try:
+                clip_frames = read_video(
+                    str(video_path),
+                    seek_time=seconds_start,
+                    duration=clip_seconds,
+                    target_fps=self.video_fps,
+                )
+            except Exception:
+                clip_frames = None
+            if clip_frames is not None and clip_frames.shape[0] == 0:
+                clip_frames = None
+
+        screenshot_frame: tp.Optional[torch.Tensor] = None
+        if screenshot_path is not None:
+            try:
+                screenshot_frame = read_video(
+                    str(screenshot_path),
+                    seek_time=0.0,
+                    duration=1.0 / max(self.video_fps, 1),
+                    target_fps=self.video_fps,
+                )
+            except Exception:
+                screenshot_frame = None
+            if screenshot_frame is not None and screenshot_frame.shape[0] == 0:
+                screenshot_frame = None
+
+        if clip_frames is None and screenshot_frame is None:
+            return None
+
+        if clip_frames is None:
+            return screenshot_frame[:1].repeat(frame_count, 1, 1, 1)
+        if screenshot_frame is None:
+            return clip_frames
+
+        composed_frames = clip_frames.clone()
+        composed_frames[0] = screenshot_frame[0]
+        return composed_frames
+
     def _resolve_video_duration(self, record: tp.Dict[str, tp.Any]) -> float:
         explicit_duration = _to_float(record.get("video_duration_seconds"))
         if explicit_duration is not None:
@@ -584,19 +638,15 @@ class IFCapsFineTuneDataset(Dataset):
         if not self.include_video_conditioning:
             return self._zero_video_prompt(clip_seconds)
 
-        video_path = self._resolve_path(record.get("video_path") or record.get("video"))
-        if video_path is None:
-            return self._zero_video_prompt(clip_seconds)
-
-        video_tensor = read_video(
-            str(video_path),
-            seek_time=seconds_start,
-            duration=clip_seconds,
-            target_fps=self.video_fps,
+        visual_frames = self._load_visual_frames(
+            record,
+            seconds_start=seconds_start,
+            clip_seconds=clip_seconds,
         )
-        if video_tensor.shape[0] == 0:
+        video_path = self._resolve_path(record.get("video_path") or record.get("video"))
+        if visual_frames is None:
             return self._zero_video_prompt(clip_seconds)
-        video_tensor = video_tensor.unsqueeze(0)
+        video_tensor = visual_frames.unsqueeze(0)
 
         sync_path = self._resolve_path(record.get("video_sync_frames_path"))
         if sync_path is not None and sync_path.exists():
@@ -610,7 +660,7 @@ class IFCapsFineTuneDataset(Dataset):
                 if video_sync_frames.ndim == 2:
                     video_sync_frames = video_sync_frames.unsqueeze(0)
             else:
-                if self.compute_video_sync_on_the_fly:
+                if self.compute_video_sync_on_the_fly and video_path is not None:
                     video_sync_frames = encode_video_with_synchformer(
                         str(video_path),
                         self.model_name,

@@ -199,7 +199,11 @@ def resolve_lora_config(lora_checkpoint: tp.Dict[str, tp.Any]) -> tp.Dict[str, t
     checkpoint_config = dict(lora_checkpoint.get("lora_config") or {})
     inferred_rank = _infer_rank_from_lora_state_dict(lora_state_dict)
     if inferred_rank is not None:
-        checkpoint_config.setdefault("rank", inferred_rank)
+        checkpoint_rank = checkpoint_config.get("rank")
+        if checkpoint_rank is not None and int(checkpoint_rank) != inferred_rank:
+            checkpoint_config["rank"] = inferred_rank
+        else:
+            checkpoint_config.setdefault("rank", inferred_rank)
 
     checkpoint_config.setdefault("rank", 8)
     checkpoint_config.setdefault("alpha", 16.0)
