@@ -1,7 +1,9 @@
 import json
 import math
+import os
 import shutil
 import subprocess
+import sys
 import tempfile
 import types
 import unittest
@@ -1407,6 +1409,175 @@ class IFCapsFineTuneTests(unittest.TestCase):
                 train_rows = [json.loads(line) for line in handle]
             self.assertEqual(len(train_rows), 1)
             self.assertEqual(train_rows[0]["audio_path"], str((audio_dir / "asmr_0000.wav").resolve()))
+
+    def test_prepare_mixed_preference_cli_preserves_template_lora_settings(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            dataset_root = Path(tmpdir) / "dataset"
+            audio_dir = dataset_root / "audio" / "audio_targets"
+            manifest_dir = dataset_root / "audio"
+            audio_dir.mkdir(parents=True)
+            manifest_dir.mkdir(parents=True, exist_ok=True)
+
+            _write_wav(audio_dir / "clip_0000.wav", sample_rate=16000)
+            records = [
+                {
+                    "clip_id": "clip_0000",
+                    "clip_index": 0,
+                    "sample_group_id": "group-a",
+                    "audio_path": str(audio_dir / "clip_0000.wav"),
+                    "tagged_training_caption": "[asmr]: clip zero",
+                    "source_family": "asmr",
+                    "preference_tags": ["asmr"],
+                    "start_s": 0.0,
+                    "end_s": 1.0,
+                    "split": "train",
+                },
+            ]
+            manifest_path = manifest_dir / "audio_manifest_split.jsonl"
+            with manifest_path.open("w") as handle:
+                for record in records:
+                    handle.write(json.dumps(record) + "\n")
+
+            template_path = Path(tmpdir) / "template.json"
+            template_path.write_text(
+                json.dumps(
+                    {
+                        "pretrained_name": "HKUSTAudio/AudioX-MAF-MMDiT",
+                        "output_dir": "./outputs/template",
+                        "data": {
+                            "train_manifest": "./data/train.jsonl",
+                            "val_manifest": "./data/val.jsonl",
+                            "include_video_conditioning": True,
+                            "include_audio_conditioning": True,
+                        },
+                        "evaluation": {
+                            "test_manifest": "./data/test.jsonl",
+                        },
+                        "trainer": {
+                            "max_epochs": 10,
+                        },
+                        "checkpointing": {
+                            "enabled": True,
+                            "save_resume_checkpoints": True,
+                        },
+                        "lora": {
+                            "enabled": True,
+                            "rank": 16,
+                            "alpha": 32.0,
+                        },
+                        "wandb": {
+                            "enabled": True,
+                            "project": "audiox-finetune",
+                            "name": "template-run",
+                            "offline": False,
+                        },
+                    }
+                )
+            )
+
+            output_dir = Path(tmpdir) / "prepared"
+            script_path = Path(__file__).resolve().parents[1] / "example" / "prepare_mixed_preference_run.py"
+            env = dict(os.environ)
+            env["PYTHONPATH"] = str(Path(__file__).resolve().parents[1])
+            subprocess.run(
+                [
+                    sys.executable,
+                    str(script_path),
+                    "--dataset-root",
+                    str(dataset_root),
+                    "--output-dir",
+                    str(output_dir),
+                    "--config-template",
+                    str(template_path),
+                ],
+                check=True,
+                env=env,
+                capture_output=True,
+                text=True,
+            )
+
+            config = json.loads((output_dir / "config_mixed_preference.json").read_text())
+            self.assertEqual(config["lora"]["rank"], 16)
+            self.assertEqual(config["lora"]["alpha"], 32.0)
+            self.assertEqual(config["trainer"]["max_epochs"], 10)
+            self.assertEqual(config["data"]["train_manifest"], str(output_dir / "manifests" / "train.jsonl"))
+            self.assertEqual(config["evaluation"]["test_manifest"], str(output_dir / "manifests" / "test.jsonl"))
+
+    def test_prepare_mixed_preference_cli_rejects_conflicting_template_semantics(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            dataset_root = Path(tmpdir) / "dataset"
+            audio_dir = dataset_root / "audio" / "audio_targets"
+            manifest_dir = dataset_root / "audio"
+            audio_dir.mkdir(parents=True)
+            manifest_dir.mkdir(parents=True, exist_ok=True)
+
+            _write_wav(audio_dir / "clip_0000.wav", sample_rate=16000)
+            records = [
+                {
+                    "clip_id": "clip_0000",
+                    "clip_index": 0,
+                    "sample_group_id": "group-a",
+                    "audio_path": str(audio_dir / "clip_0000.wav"),
+                    "tagged_training_caption": "[asmr]: clip zero",
+                    "source_family": "asmr",
+                    "preference_tags": ["asmr"],
+                    "start_s": 0.0,
+                    "end_s": 1.0,
+                    "split": "train",
+                },
+            ]
+            manifest_path = manifest_dir / "audio_manifest_split.jsonl"
+            with manifest_path.open("w") as handle:
+                for record in records:
+                    handle.write(json.dumps(record) + "\n")
+
+            template_path = Path(tmpdir) / "template.json"
+            template_path.write_text(
+                json.dumps(
+                    {
+                        "pretrained_name": "HKUSTAudio/AudioX-MAF-MMDiT",
+                        "output_dir": "./outputs/template",
+                        "data": {
+                            "train_manifest": "./data/train.jsonl",
+                            "val_manifest": "./data/val.jsonl",
+                            "include_video_conditioning": True,
+                            "include_audio_conditioning": True,
+                            "sample_strategy": "weighted",
+                            "standalone_ratio": 0.3,
+                            "continuation_ratio": 0.7,
+                        },
+                        "evaluation": {"test_manifest": "./data/test.jsonl"},
+                        "training": {"trainable_scope": "multimodal_continuation_lora"},
+                        "lora": {"enabled": True, "rank": 16, "alpha": 32.0},
+                        "wandb": {"enabled": True, "project": "audiox-finetune", "name": "template-run", "offline": False},
+                    }
+                )
+            )
+
+            output_dir = Path(tmpdir) / "prepared"
+            script_path = Path(__file__).resolve().parents[1] / "example" / "prepare_mixed_preference_run.py"
+            env = dict(os.environ)
+            env["PYTHONPATH"] = str(Path(__file__).resolve().parents[1])
+            result = subprocess.run(
+                [
+                    sys.executable,
+                    str(script_path),
+                    "--dataset-root",
+                    str(dataset_root),
+                    "--output-dir",
+                    str(output_dir),
+                    "--config-template",
+                    str(template_path),
+                    "--disable-audio-conditioning",
+                ],
+                check=False,
+                env=env,
+                capture_output=True,
+                text=True,
+            )
+
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn("include_audio_conditioning=true", result.stderr)
 
     def test_mixed_preference_manifest_smoke_dataset_shapes_with_video_enabled(self):
         with tempfile.TemporaryDirectory() as tmpdir:

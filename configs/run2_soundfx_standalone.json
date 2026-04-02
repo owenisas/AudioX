@@ -30,7 +30,7 @@
     "cfg_dropout_prob": 0.1,
     "timestep_sampler": "uniform",
     "log_loss_info": false,
-    "trainable_scope": "maf_continuation_lora"
+    "trainable_scope": "multimodal_continuation_lora"
   },
   "trainer": {
     "accelerator": "gpu",

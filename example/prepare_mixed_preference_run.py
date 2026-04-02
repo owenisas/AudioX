@@ -1,5 +1,6 @@
 import argparse
 import json
+import sys
 from pathlib import Path
 
 from audiox.data.mixed_preference import (
@@ -7,6 +8,139 @@ from audiox.data.mixed_preference import (
     prepare_mixed_preference_manifests,
 )
 from audiox.models.lora import DEFAULT_LORA_TARGET_PATTERNS
+
+
+def _cli_flag_present(flag: str) -> bool:
+    return flag in sys.argv[1:]
+
+
+def _get_nested(config: dict, path: tuple[str, ...]) -> tuple[bool, object]:
+    current: object = config
+    for key in path:
+        if not isinstance(current, dict) or key not in current:
+            return False, None
+        current = current[key]
+    return True, current
+
+
+def _enforce_template_semantics(
+    template_config: dict,
+    run_config: dict,
+    *,
+    args: argparse.Namespace,
+) -> None:
+    template_data = template_config.get("data", {})
+
+    # Fail fast when explicit CLI semantics conflict with template semantics.
+    if _cli_flag_present("--disable-video-conditioning") and bool(
+        template_data.get("include_video_conditioning", True)
+    ):
+        raise SystemExit(
+            "Config template sets data.include_video_conditioning=true but --disable-video-conditioning was passed."
+        )
+    if _cli_flag_present("--disable-audio-conditioning") and bool(
+        template_data.get("include_audio_conditioning", True)
+    ):
+        raise SystemExit(
+            "Config template sets data.include_audio_conditioning=true but --disable-audio-conditioning was passed."
+        )
+    if _cli_flag_present("--sample-strategy"):
+        template_strategy = template_data.get("sample_strategy")
+        if template_strategy is not None and template_strategy != args.sample_strategy:
+            raise SystemExit(
+                f"Config template sets data.sample_strategy={template_strategy!r} but "
+                f"--sample-strategy={args.sample_strategy!r} was passed."
+            )
+    if _cli_flag_present("--standalone-ratio"):
+        template_ratio = template_data.get("standalone_ratio")
+        if template_ratio is not None and float(template_ratio) != float(args.standalone_ratio):
+            raise SystemExit(
+                f"Config template sets data.standalone_ratio={template_ratio!r} but "
+                f"--standalone-ratio={args.standalone_ratio!r} was passed."
+            )
+    if _cli_flag_present("--continuation-ratio"):
+        template_ratio = template_data.get("continuation_ratio")
+        if template_ratio is not None and float(template_ratio) != float(args.continuation_ratio):
+            raise SystemExit(
+                f"Config template sets data.continuation_ratio={template_ratio!r} but "
+                f"--continuation-ratio={args.continuation_ratio!r} was passed."
+            )
+
+    protected_paths = [
+        ("training", "trainable_scope"),
+        ("training", "use_ema"),
+        ("lora", "rank"),
+        ("lora", "alpha"),
+        ("lora", "dropout"),
+        ("lora", "target_patterns"),
+        ("data", "include_video_conditioning"),
+        ("data", "include_audio_conditioning"),
+        ("data", "sample_strategy"),
+        ("data", "standalone_ratio"),
+        ("data", "continuation_ratio"),
+    ]
+    for path in protected_paths:
+        present, expected = _get_nested(template_config, path)
+        if not present:
+            continue
+        actual_present, actual = _get_nested(run_config, path)
+        if not actual_present:
+            raise SystemExit(f"Generated config is missing template-defined field: {'.'.join(path)}")
+        if actual != expected:
+            raise SystemExit(
+                f"Generated config changed template-defined field {'.'.join(path)}: "
+                f"expected {expected!r}, got {actual!r}"
+            )
+
+
+def apply_runtime_bindings(
+    run_config: dict,
+    *,
+    output_dir: str,
+    train_manifest: str,
+    val_manifest: str | None,
+    test_manifest: str | None,
+    cache_dir: str,
+    pretrained_name: str,
+    run_name: str,
+    wandb_project: str,
+    wandb_entity: str | None,
+    wandb_offline: bool,
+    huggingface_repo_id: str | None,
+    huggingface_private: bool,
+) -> dict:
+    data = run_config.setdefault("data", {})
+    data["train_manifest"] = train_manifest
+    data["val_manifest"] = val_manifest
+
+    evaluation = run_config.setdefault("evaluation", {})
+    evaluation["test_manifest"] = test_manifest
+
+    run_config["output_dir"] = output_dir
+    run_config["cache_dir"] = cache_dir
+    run_config["pretrained_name"] = pretrained_name
+
+    wandb = run_config.setdefault("wandb", {})
+    wandb.setdefault("enabled", True)
+    wandb["project"] = wandb_project
+    wandb["entity"] = wandb_entity
+    wandb["name"] = run_name
+    wandb["offline"] = wandb_offline
+    wandb.setdefault("log_model", False)
+
+    if huggingface_repo_id:
+        huggingface = run_config.setdefault("huggingface", {})
+        huggingface["enabled"] = True
+        huggingface["repo_id"] = huggingface_repo_id
+        huggingface["repo_type"] = "model"
+        huggingface["private"] = huggingface_private
+        huggingface.setdefault("upload_final_checkpoint", True)
+        huggingface.setdefault("upload_resolved_config", True)
+        huggingface.setdefault("upload_run_config", True)
+        huggingface.setdefault("upload_manifest_summary", True)
+        huggingface.setdefault("upload_train_log", False)
+
+    return run_config
 
 
 def build_run_config(
@@ -220,6 +354,11 @@ def main() -> None:
         default=None,
         help="Optional run name. Defaults to a mixed-preference prefix with the dataset stem.",
     )
+    parser.add_argument(
+        "--config-template",
+        default=None,
+        help="Optional config JSON to use as the base run config. Runtime paths are rebound onto this template.",
+    )
     args = parser.parse_args()
 
     dataset_root_or_manifest = args.manifest_path or args.dataset_root
@@ -231,20 +370,54 @@ def main() -> None:
     (output_dir / "outputs").mkdir(parents=True, exist_ok=True)
 
     source_families = [family.strip() for family in args.source_families.split(",") if family.strip()]
+    template_config = json.loads(Path(args.config_template).read_text()) if args.config_template else None
+
+    include_video = not args.disable_video_conditioning
+    if template_config is not None:
+        template_data = template_config.get("data", {})
+        include_video = bool(template_data.get("include_video_conditioning", include_video))
+
     manifest_info = prepare_mixed_preference_manifests(
         dataset_root_or_manifest,
         output_dir / "manifests",
         media_root=args.media_root,
         source_families=source_families,
         caption_field=args.caption_field,
-        include_video=not args.disable_video_conditioning,
+        include_video=include_video,
         adjacency_tolerance=args.adjacency_tolerance,
         sound_effects_root_or_manifest=args.sound_effects_root,
         standalone_only=args.standalone_only,
     )
 
     run_name = args.run_name or f"mixed-preference-{Path(dataset_root_or_manifest).stem}"
-    run_config = build_run_config(
+    if args.config_template:
+        if template_config is None:
+            run_config = json.loads(Path(args.config_template).read_text())
+        else:
+            run_config = json.loads(json.dumps(template_config))
+    else:
+        run_config = build_run_config(
+            output_dir=str(output_dir / "outputs"),
+            train_manifest=manifest_info["train_manifest_path"],
+            val_manifest=manifest_info["val_manifest_path"],
+            test_manifest=manifest_info["test_manifest_path"],
+            cache_dir=args.cache_dir,
+            pretrained_name=args.pretrained_name,
+            run_name=run_name,
+            wandb_project=args.wandb_project,
+            wandb_entity=args.wandb_entity,
+            wandb_offline=args.wandb_offline,
+            huggingface_repo_id=args.hf_repo_id,
+            huggingface_private=not args.hf_public,
+            include_video_conditioning=not args.disable_video_conditioning,
+            standalone_ratio=args.standalone_ratio,
+            continuation_ratio=args.continuation_ratio,
+            include_audio_conditioning=not args.disable_audio_conditioning,
+            sample_strategy=args.sample_strategy,
+        )
+
+    run_config = apply_runtime_bindings(
+        run_config,
         output_dir=str(output_dir / "outputs"),
         train_manifest=manifest_info["train_manifest_path"],
         val_manifest=manifest_info["val_manifest_path"],
@@ -257,15 +430,12 @@ def main() -> None:
         wandb_offline=args.wandb_offline,
         huggingface_repo_id=args.hf_repo_id,
         huggingface_private=not args.hf_public,
-        include_video_conditioning=not args.disable_video_conditioning,
-        standalone_ratio=args.standalone_ratio,
-        continuation_ratio=args.continuation_ratio,
-        include_audio_conditioning=not args.disable_audio_conditioning,
-        sample_strategy=args.sample_strategy,
     )
+    if template_config is not None:
+        _enforce_template_semantics(template_config, run_config, args=args)
 
     config_path = output_dir / "config_mixed_preference.json"
-    config_path.write_text(json.dumps(run_config, indent=2))
+    config_path.write_text(json.dumps(run_config, indent=2) + "\n")
     summary_path = output_dir / "manifest_summary.json"
     summary_path.write_text(json.dumps(manifest_info, indent=2))
 
