@@ -1459,6 +1459,9 @@ class IFCapsFineTuneTests(unittest.TestCase):
                         "checkpointing": {
                             "enabled": True,
                             "save_resume_checkpoints": True,
+                            "monitor": "valid/loss",
+                            "mode": "min",
+                            "save_top_k": 3,
                         },
                         "lora": {
                             "enabled": True,
@@ -1502,6 +1505,9 @@ class IFCapsFineTuneTests(unittest.TestCase):
             self.assertEqual(config["trainer"]["max_epochs"], 10)
             self.assertEqual(config["data"]["train_manifest"], str(output_dir / "manifests" / "train.jsonl"))
             self.assertEqual(config["evaluation"]["test_manifest"], str(output_dir / "manifests" / "test.jsonl"))
+            self.assertEqual(config["checkpointing"]["monitor"], "valid/loss")
+            self.assertEqual(config["checkpointing"]["mode"], "min")
+            self.assertEqual(config["checkpointing"]["save_top_k"], 3)
 
     def test_prepare_mixed_preference_cli_rejects_conflicting_template_semantics(self):
         with tempfile.TemporaryDirectory() as tmpdir:

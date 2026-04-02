@@ -67,6 +67,9 @@ def _enforce_template_semantics(
             )
 
     protected_paths = [
+        ("trainer", "max_epochs"),
+        ("trainer", "max_steps"),
+        ("trainer", "accumulate_grad_batches"),
         ("training", "trainable_scope"),
         ("training", "use_ema"),
         ("lora", "rank"),
@@ -78,6 +81,11 @@ def _enforce_template_semantics(
         ("data", "sample_strategy"),
         ("data", "standalone_ratio"),
         ("data", "continuation_ratio"),
+        ("checkpointing", "monitor"),
+        ("checkpointing", "mode"),
+        ("checkpointing", "save_top_k"),
+        ("checkpointing", "every_n_epochs"),
+        ("checkpointing", "every_n_train_steps"),
     ]
     for path in protected_paths:
         present, expected = _get_nested(template_config, path)
