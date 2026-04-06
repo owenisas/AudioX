@@ -7,7 +7,27 @@ from einops.layers.torch import Rearrange
 import torch
 import torch.nn.functional as F
 from torch import nn, einsum
-from torch.cuda.amp import autocast
+import contextlib
+from functools import wraps
+
+def autocast(enabled=False):
+    """Device-agnostic autocast decorator replacing torch.cuda.amp.autocast.
+
+    Detects the device from the first tensor argument and applies
+    ``torch.amp.autocast`` with the correct ``device_type``.
+    """
+    def decorator(fn):
+        @wraps(fn)
+        def wrapper(*args, **kwargs):
+            device_type = "cpu"
+            for arg in (*args, *kwargs.values()):
+                if isinstance(arg, torch.Tensor):
+                    device_type = arg.device.type
+                    break
+            with torch.amp.autocast(device_type=device_type, enabled=enabled):
+                return fn(*args, **kwargs)
+        return wrapper
+    return decorator
 from typing import Callable, Literal
         
 try:
@@ -312,7 +332,10 @@ class Attention(nn.Module):
         if natten_kernel_size is not None:
             return
 
-        self.use_pt_flash = torch.cuda.is_available() and version.parse(torch.__version__) >= version.parse('2.0.0')
+        _has_accelerator = torch.cuda.is_available() or (
+            hasattr(torch.backends, "mps") and torch.backends.mps.is_available()
+        )
+        self.use_pt_flash = _has_accelerator and version.parse(torch.__version__) >= version.parse('2.0.0')
 
         self.use_fa_flash = torch.cuda.is_available() and flash_attn_func is not None
 
@@ -380,7 +403,12 @@ class Attention(nn.Module):
 
             causal = False
         
-        with torch.backends.cuda.sdp_kernel(**self.sdp_kwargs):
+        _sdp_ctx = (
+            torch.backends.cuda.sdp_kernel(**self.sdp_kwargs)
+            if q.device.type == "cuda"
+            else contextlib.nullcontext()
+        )
+        with _sdp_ctx:
             out = F.scaled_dot_product_attention(
                 q, k, v,
                 attn_mask = mask,

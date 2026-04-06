@@ -277,3 +277,31 @@ def load_lora_checkpoint(module: nn.Module, checkpoint_path: tp.Union[str, Path]
 
     checkpoint["lora_config"] = lora_config
     return checkpoint
+
+
+def merge_lora_weights(module: nn.Module) -> int:
+    """Merge LoRA adapters into base weights, replacing LoRALinear with plain nn.Linear.
+
+    Eliminates ~80K extra matmuls during 100-step CFG inference.
+    Safe at eval time because dropout is ``nn.Identity`` (dropout=0).
+
+    After merging: ``W_new = W_base + scaling * (B @ A)``
+
+    Args:
+        module: The model with injected LoRA layers.
+
+    Returns:
+        Number of LoRA layers merged.
+    """
+    merged_count = 0
+    for name, child in list(module.named_children()):
+        if isinstance(child, LoRALinear):
+            with torch.no_grad():
+                child.base.weight.add_(
+                    (child.lora_b.weight @ child.lora_a.weight) * child.scaling
+                )
+            setattr(module, name, child.base)
+            merged_count += 1
+        else:
+            merged_count += merge_lora_weights(child)
+    return merged_count

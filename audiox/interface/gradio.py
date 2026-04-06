@@ -534,7 +534,10 @@ def generate_cond(
     if original_video_path:
         merge_video_audio(original_video_path, audio_path, output_video_path, seconds_start, seconds_total)
     
-    torch.cuda.empty_cache()
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
+    elif hasattr(torch, "mps") and hasattr(torch.mps, "empty_cache"):
+        torch.mps.empty_cache()
     gc.collect()
 
     return (output_video_path, audio_path)

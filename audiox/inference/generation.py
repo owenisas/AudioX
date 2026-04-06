@@ -8,11 +8,12 @@ from .utils import prepare_audio
 from .sampling import sample, sample_k, sample_rf
 from ..data.utils import PadCrop
 
-torch.backends.cudnn.benchmark = False
-torch.backends.cudnn.deterministic = True
-torch.backends.cuda.matmul.allow_tf32 = False
-torch.backends.cudnn.allow_tf32 = False 
-torch.set_float32_matmul_precision("highest") # FP32 
+if torch.cuda.is_available():
+    torch.backends.cudnn.benchmark = False
+    torch.backends.cudnn.deterministic = True
+    torch.backends.cuda.matmul.allow_tf32 = False
+    torch.backends.cudnn.allow_tf32 = False
+torch.set_float32_matmul_precision("highest") # FP32
 
 def generate_diffusion_uncond(
         model,
@@ -149,10 +150,11 @@ def generate_diffusion_cond(
     # Define the initial noise immediately after setting the seed
     noise = torch.randn([batch_size, model.io_channels, sample_size], device=device)
 
-    torch.backends.cuda.matmul.allow_tf32 = False
-    torch.backends.cudnn.allow_tf32 = False
-    torch.backends.cuda.matmul.allow_fp16_reduced_precision_reduction = False
-    torch.backends.cudnn.benchmark = False
+    if torch.cuda.is_available():
+        torch.backends.cuda.matmul.allow_tf32 = False
+        torch.backends.cudnn.allow_tf32 = False
+        torch.backends.cuda.matmul.allow_fp16_reduced_precision_reduction = False
+        torch.backends.cudnn.benchmark = False
 
     # Conditioning
     assert conditioning is not None or conditioning_tensors is not None, "Must provide either conditioning or conditioning_tensors"
@@ -244,7 +246,10 @@ def generate_diffusion_cond(
     del noise
     del conditioning_tensors
     del conditioning_inputs
-    torch.cuda.empty_cache()
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
+    elif hasattr(torch, "mps") and hasattr(torch.mps, "empty_cache"):
+        torch.mps.empty_cache()
     # Denoising process done. 
     # If this is latent diffusion, decode latents back into audio
 
@@ -253,7 +258,8 @@ def generate_diffusion_cond(
         sampled = sampled.to(next(model.pretransform.parameters()).dtype)
 
         model.pretransform = model.pretransform.to(dtype=torch.float32).eval()
-        with torch.cuda.amp.autocast(enabled=False):        
+        _device_type = sampled.device.type
+        with torch.amp.autocast(device_type=_device_type, enabled=False):
             sampled = model.pretransform.decode(sampled.to(dtype=torch.float32))
 
     # Return audio

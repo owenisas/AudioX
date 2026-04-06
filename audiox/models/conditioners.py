@@ -146,7 +146,10 @@ class CLAPTextConditioner(Conditioner):
         del self.model.model.audio_branch
 
         gc.collect()
-        torch.cuda.empty_cache()
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+        elif hasattr(torch, "mps") and hasattr(torch.mps, "empty_cache"):
+            torch.mps.empty_cache()
 
     def get_clap_features(self, prompts, layer_ix=-2, device: tp.Any = "cuda"):
         prompt_tokens = self.model.tokenizer(prompts)
@@ -224,7 +227,10 @@ class CLAPAudioConditioner(Conditioner):
         del self.model.model.text_branch
 
         gc.collect()
-        torch.cuda.empty_cache()
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+        elif hasattr(torch, "mps") and hasattr(torch.mps, "empty_cache"):
+            torch.mps.empty_cache()
 
     def forward(self, audios: tp.Union[torch.Tensor, tp.List[torch.Tensor], tp.Tuple[torch.Tensor]] , device: tp.Any = "cuda") -> tp.Any:
 
@@ -236,7 +242,7 @@ class CLAPAudioConditioner(Conditioner):
         # Convert to mono
         mono_audios = audios.mean(dim=1)
 
-        with torch.cuda.amp.autocast(enabled=False):
+        with torch.amp.autocast(device_type=mono_audios.device.type, enabled=False):
             audio_embedding = self.model.get_audio_embedding_from_data(mono_audios.float(), use_tensor=True)
 
         audio_embedding = audio_embedding.unsqueeze(1).to(device)
@@ -898,11 +904,13 @@ class AudioAutoencoderConditionerv2(Conditioner):
     def __init__(self, pretransform: Pretransform, output_dim: int, latent_seq_len: int = 237, mask_ratio_start: float = 0, mask_ratio_end: float = 0):
         super().__init__(pretransform.encoded_channels, output_dim)
 
-        self.pretransform = pretransform      
+        self.pretransform = pretransform
         self.latent_seq_len = latent_seq_len
         self.mask_ratio_start = mask_ratio_start
         self.mask_ratio_end = mask_ratio_end
-        # self.empty_audio_feat = nn.Parameter(torch.zeros(1, self.latent_seq_len, self.proj_out.out_features), requires_grad=True)
+        # Note: empty_audio_feat is commented out in the base AudioX-MAF-MMDiT checkpoint.
+        # The model was trained to handle encoded-silence latents directly.
+        # self.empty_audio_feat = nn.Parameter(torch.zeros(1, 128, self.proj_out.out_features), requires_grad=True)
         # nn.init.constant_(self.empty_audio_feat, 0)
         self.proj_features_128 = nn.Linear(in_features=self.latent_seq_len, out_features=128)
         
@@ -938,10 +946,8 @@ class AudioAutoencoderConditionerv2(Conditioner):
             pad_len = max_len - audio[i].shape[-1]
             if pad_len > 0:
                 audio[i] = torch.nn.functional.pad(audio[i], (0, pad_len))
-            # audio[i] = audio[i].unsqueeze(0)
-            
-        audio = torch.cat(audio, dim=0)
 
+        audio = torch.cat(audio, dim=0)
 
         # Convert audio to pretransform input channels
         audio = set_audio_channels(audio, self.pretransform.io_channels)
@@ -953,8 +959,8 @@ class AudioAutoencoderConditionerv2(Conditioner):
         latents = self.proj_features_128(latents)
         latents = latents.permute(0, 2, 1)
         latents = self.proj_out(latents)
-    
-        return latents, torch.ones(latents.shape[0], latents.shape[2]).to(latents.device)
+
+        return [latents, torch.ones(latents.shape[0], latents.shape[2]).to(latents.device)]
   
 class MultiConditioner(nn.Module):
     """
