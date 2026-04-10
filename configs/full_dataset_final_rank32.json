@@ -1,0 +1,91 @@
+{
+  "pretrained_name": "HKUSTAudio/AudioX-MAF-MMDiT",
+  "output_dir": "./outputs/full_dataset_final_rank32",
+  "data": {
+    "train_manifest": "./data/train.jsonl",
+    "val_manifest": "./data/val.jsonl",
+    "batch_size": 8,
+    "eval_batch_size": 4,
+    "num_workers": 4,
+    "pin_memory": true,
+    "persistent_workers": true,
+    "drop_last": false,
+    "random_crop": false,
+    "seed": 42,
+    "prompt_format": "natural",
+    "include_video_conditioning": true,
+    "include_audio_conditioning": true,
+    "compute_video_sync_on_the_fly": false,
+    "sample_strategy": "uniform",
+    "standalone_ratio": 1.0,
+    "continuation_ratio": 0.0,
+    "sample_text_prompt_candidates": true,
+    "sample_text_prompt_candidates_for_eval": false,
+    "video_duration_seconds": 10.0
+  },
+  "training": {
+    "text_max_length": 256,
+    "learning_rate": 5e-06,
+    "lora_learning_rate": 5e-05,
+    "use_ema": true,
+    "mask_padding": true,
+    "cfg_dropout_prob": 0.1,
+    "timestep_sampler": "uniform",
+    "log_loss_info": false,
+    "trainable_scope": "asmr_continuation_lora"
+  },
+  "trainer": {
+    "accelerator": "gpu",
+    "devices": 1,
+    "precision": "bf16-mixed",
+    "max_epochs": 5,
+    "max_steps": 15000,
+    "accumulate_grad_batches": 2,
+    "gradient_clip_val": 1.0,
+    "log_every_n_steps": 10,
+    "num_sanity_val_steps": 0,
+    "check_val_every_n_epoch": 1
+  },
+  "checkpointing": {
+    "dirpath": "./outputs/full_dataset_final_rank32/checkpoints",
+    "filename": "epoch={epoch}-step={step}",
+    "enabled": true,
+    "save_last": true,
+    "save_top_k": 2,
+    "monitor": "valid/loss",
+    "mode": "min",
+    "every_n_epochs": 1,
+    "resume_every_n_epochs": 1,
+    "save_on_train_epoch_end": true,
+    "save_final_checkpoint": true,
+    "save_lora_only": true,
+    "save_resume_checkpoints": true,
+    "resume_checkpoint_filename": "resume-epoch={epoch}-step={step}",
+    "final_resume_checkpoint_name": "final-resume.ckpt",
+    "final_checkpoint_name": "final-lora-state.pt"
+  },
+  "lora": {
+    "enabled": true,
+    "rank": 32,
+    "alpha": 64.0,
+    "dropout": 0.05,
+    "freeze_non_lora": true,
+    "target_patterns": [
+      "to_q",
+      "to_kv",
+      "to_qkv",
+      "to_out",
+      ".qkv",
+      "ffn"
+    ]
+  },
+  "wandb": {
+    "enabled": true,
+    "project": "audiox-finetune",
+    "name": "full-dataset-final-rank32",
+    "offline": false,
+    "log_model": false,
+    "monitor": "valid/loss",
+    "mode": "min"
+  }
+}

@@ -1,7 +1,8 @@
 import json
-import random
 import typing as tp
 from pathlib import Path
+
+from .mixed_preference import collect_text_prompt_candidates
 
 
 ASMR_SAMPLE_RATE = 48_000
@@ -63,6 +64,33 @@ def _maybe_float(value: tp.Any) -> tp.Optional[float]:
         return None
 
 
+def _normalize_prompt_key(value: tp.Any) -> str:
+    return " ".join(str(value).strip().split())
+
+
+def _iter_prompt_values(value: tp.Any) -> tp.Iterable[str]:
+    if value is None:
+        return
+    if isinstance(value, str):
+        text = value.strip()
+        if text:
+            yield text
+        return
+    if isinstance(value, dict):
+        text = _first_nonempty(value.get("text"), value.get("caption"), value.get("prompt"))
+        if text:
+            yield text
+        return
+    if isinstance(value, (list, tuple)):
+        for item in value:
+            yield from _iter_prompt_values(item)
+        return
+
+    text = str(value).strip()
+    if text:
+        yield text
+
+
 def _resolve_path(value: tp.Any, base_dir: Path) -> tp.Optional[str]:
     text = _first_nonempty(value)
     if not text:
@@ -106,6 +134,22 @@ def derive_chunk_index(record: tp.Dict[str, tp.Any]) -> tp.Tuple[int, float, str
     raise ValueError("ASMR chunk metadata must include chunk_index/clip_index/start_s/clip_id.")
 
 
+def _collect_asmr_text_prompt_candidates(record: tp.Dict[str, tp.Any]) -> tp.List[str]:
+    candidates: tp.List[str]
+    for preferred_field in (
+        "caption",
+        "tagged_training_caption",
+        "training_caption",
+        "tagged_caption",
+    ):
+        if _first_nonempty(record.get(preferred_field)):
+            candidates = collect_text_prompt_candidates(record, preferred_field)
+            break
+    else:
+        candidates = collect_text_prompt_candidates(record, "text_prompt")
+    return candidates
+
+
 def build_asmr_manifest_rows(
     records: tp.Sequence[tp.Dict[str, tp.Any]],
     *,
@@ -129,7 +173,8 @@ def build_asmr_manifest_rows(
             if audio_path is None:
                 raise ValueError(f"ASMR chunk in sequence {sequence_id} is missing audio_path.")
 
-            text_prompt = _first_nonempty(record.get("text_prompt"), record.get("caption"), record.get("prompt"))
+            text_prompt_candidates = _collect_asmr_text_prompt_candidates(record)
+            text_prompt = text_prompt_candidates[0] if text_prompt_candidates else ""
             if not text_prompt:
                 raise ValueError(f"ASMR chunk {audio_path} is missing caption/text_prompt.")
 
@@ -148,6 +193,8 @@ def build_asmr_manifest_rows(
                 "seconds_start": 0.0,
                 "seconds_total": seconds_total,
             }
+            if len(text_prompt_candidates) > 1:
+                row_base["text_prompt_candidates"] = text_prompt_candidates
             if video_path:
                 row_base["video_path"] = video_path
 

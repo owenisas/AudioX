@@ -478,6 +478,53 @@ class IFCapsFineTuneTests(unittest.TestCase):
         self.assertEqual(rows[2]["seconds_total"], ASMR_SECONDS_TOTAL)
         self.assertTrue(rows[1]["video_path"].endswith("seq-a_001.mp4"))
 
+    def test_build_asmr_manifest_rows_emits_text_prompt_candidates(self):
+        records = [
+            {
+                "sequence_id": "seq-a",
+                "chunk_index": 0,
+                "audio_path": "seq-a_000.wav",
+                "text_prompt": "Primary brushing prompt.",
+                "alternate_captions": ["Alternate brushing prompt.", "Primary brushing prompt."],
+                "augmented_captions": [{"style": "timeline", "text": "Timeline brushing prompt."}],
+            },
+        ]
+
+        rows = build_asmr_manifest_rows(records, base_dir="/tmp")
+
+        self.assertEqual(rows[0]["text_prompt"], "Primary brushing prompt.")
+        self.assertEqual(
+            rows[0]["text_prompt_candidates"],
+            ["Primary brushing prompt.", "Alternate brushing prompt.", "Timeline brushing prompt."],
+        )
+
+    def test_build_asmr_manifest_rows_keeps_base_prompt_as_default_and_includes_tagged_alternates(self):
+        records = [
+            {
+                "sequence_id": "seq-a",
+                "chunk_index": 0,
+                "audio_path": "seq-a_000.wav",
+                "caption": "Base folk prompt.",
+                "tagged_caption": "Base folk prompt.",
+                "tagged_alternate_captions": [
+                    "Alternate folk prompt one.",
+                    "Alternate folk prompt two.",
+                ],
+            },
+        ]
+
+        rows = build_asmr_manifest_rows(records, base_dir="/tmp")
+
+        self.assertEqual(rows[0]["text_prompt"], "Base folk prompt.")
+        self.assertEqual(
+            rows[0]["text_prompt_candidates"],
+            [
+                "Base folk prompt.",
+                "Alternate folk prompt one.",
+                "Alternate folk prompt two.",
+            ],
+        )
+
     def test_split_manifest_rows_by_sequence_avoids_leakage(self):
         rows = [
             {"sequence_id": "seq-a", "sample_type": "standalone"},
